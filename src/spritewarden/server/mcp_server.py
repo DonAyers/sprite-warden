@@ -11,6 +11,7 @@ from ..tools.aseprite import open_file, find_aseprite
 from ..repo.catalog import AssetCatalog
 from ..repo.identity import CharacterIdentity
 from ..repo.palette import registry as palettes
+from ..reducer import ReduceParams, pixelize, refine
 from ..router import PipelineRouter
 
 catalog = AssetCatalog()
@@ -24,7 +25,8 @@ Use it to:
 3. Formulate optimal generation recipes with Jev and OpenRouter Fusion (`route_generation`).
 4. Validate pixel art stills against mixels, palette, and clipping (`judge_still`).
 5. Validate animations for temporal specks, spikes, and loop stutter (`judge_animation`).
-6. Open sprites and sheets in Aseprite for visual inspection (`open_in_aseprite`).
+6. Reduce any artwork to a pixel palette render, AI-refined on request (`pixelize_image`).
+7. Open sprites and sheets in Aseprite for visual inspection (`open_in_aseprite`).
 """
 
 mcp = MCPServer("spritewarden", instructions=INSTRUCTIONS)
@@ -167,6 +169,53 @@ def open_in_aseprite(
         return {"status": "ok", "message": f"Opened {file_path} in Aseprite (PID {proc.pid})"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@mcp.tool()
+def pixelize_image(
+    file_path: Annotated[str, Field(description="Path to the source image (any resolution)")],
+    palette: Annotated[str, Field(description="Palette: builtin name, lospec slug (e.g. 'na16'), 'lospec:<slug>', or a file path")] = "luap-40",
+    width: Annotated[int | None, Field(description="Target pixel width (aspect-preserving); omit to auto-search the width ladder")] = None,
+    dither: Annotated[str, Field(description="none, bayer2, bayer4, bayer8, floyd, or sierra")] = "none",
+    dither_strength: Annotated[float, Field(ge=0.0, le=1.5)] = 1.0,
+    downscale: Annotated[str, Field(description="lanczos, box, nearest, or dominant")] = "lanczos",
+    saturation: Annotated[float, Field(ge=0.5, le=1.6)] = 1.0,
+    brightness: Annotated[float, Field(ge=0.5, le=1.6)] = 1.0,
+    contrast: Annotated[float, Field(ge=0.5, le=1.6)] = 1.0,
+    refine_params: Annotated[bool, Field(description="Run the iterative refinement loop (vision-guided when use_vision)")] = False,
+    max_rounds: Annotated[int, Field(ge=1, le=8)] = 4,
+    use_vision: Annotated[bool, Field(description="Judge candidates with the OpenRouter vision model")] = False,
+    vision_model: Annotated[str, Field(description="Vision model slug")] = DEFAULT_VISION_MODEL,
+) -> dict:
+    """Reduce any image to palette-snapped pixel art; optionally AI-refine the mapping."""
+    params = ReduceParams(
+        width=width,
+        dither=dither,  # type: ignore[arg-type]
+        dither_strength=dither_strength,
+        downscale=downscale,  # type: ignore[arg-type]
+        saturation=saturation,
+        brightness=brightness,
+        contrast=contrast,
+    )
+    if not refine_params:
+        result = pixelize(file_path, palette, params)
+        return {
+            "params": result.params.model_dump(),
+            "output_size": [result.image.width, result.image.height],
+            "source_size": list(result.source_size),
+            "usage": [{"hex": h, "count": c} for h, c in result.usage],
+            "palette": result.palette_hex,
+            "note": "Image was rendered in-process; use the CLI (warden pixelize) for saved files.",
+        }
+    report = refine(
+        image_or_path=file_path,
+        palette_source=palette,
+        params=params,
+        max_rounds=max_rounds,
+        use_vision=use_vision,
+        vision_model=vision_model,
+    )
+    return report.model_dump()
 
 
 def run_mcp_server() -> None:

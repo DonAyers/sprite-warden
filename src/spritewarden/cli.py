@@ -14,9 +14,142 @@ from .tools.aseprite import open_file, edit_sheet_interactive, find_aseprite
 from .repo.catalog import AssetCatalog
 from .repo.identity import CharacterIdentity
 from .repo.palette import registry as palettes
+from .reducer import ReduceParams, pixelize, refine
 from .router import PipelineRouter
 
 console = Console()
+
+
+def _auto_preview_scale(size: tuple[int, int]) -> int:
+    return max(2, min(16, 512 // max(1, max(size))))
+
+
+def cmd_pixelize(args: argparse.Namespace) -> int:
+    from PIL import Image
+
+    params = ReduceParams(
+        width=args.width,
+        height=args.height,
+        downscale=args.downscale,
+        pre_blur=args.pre_blur,
+        saturation=args.saturation,
+        brightness=args.brightness,
+        contrast=args.contrast,
+        dither=args.dither,
+        dither_strength=args.strength,
+        max_colors=args.max_colors,
+        snap_guards=not args.no_guards,
+        alpha=args.alpha,
+    )
+    if args.scale:
+        with Image.open(args.image) as im:
+            params.width = max(1, round(im.width / args.scale))
+            params.height = max(1, round(im.height / args.scale))
+        if args.preview_scale is None:
+            args.preview_scale = args.scale
+
+    if args.refine:
+        report = refine(
+            image_or_path=args.image,
+            palette_source=args.palette,
+            params=params,
+            out_dir=args.session_dir,
+            max_rounds=args.rounds,
+            use_vision=args.vision,
+            vision_model=args.vision_model,
+            description=args.desc or "",
+        )
+        out_path = Path(args.out) if args.out else Path(report.best_image)
+        if Path(report.best_image) != out_path:
+            out_path.write_bytes(Path(report.best_image).read_bytes())
+            preview_src = Path(report.preview_image)
+            preview_path = out_path.with_name(out_path.stem + ".preview.png")
+            preview_path.write_bytes(preview_src.read_bytes())
+        else:
+            preview_path = Path(report.preview_image)
+        preview_scale_used = args.preview_scale or _auto_preview_scale(Image.open(out_path).size)
+        used_params = report.best.params
+        det_metrics = report.best.det_metrics
+        vision_notes = report.best.vision.notes if report.best.vision else ""
+        converged = report.converged
+        used_vision = report.used_vision
+        final_verdict = report.final_verdict
+        if args.open:
+            open_file(out_path)
+        if args.json:
+            print(json.dumps({
+                "report": report.model_dump(),
+                "output": str(out_path),
+                "preview": str(preview_path),
+            }, indent=2))
+            return 0
+        console.print(f"[bold cyan]Pixelize refinement:[/] {len(report.rounds)} round(s), "
+                      f"vision={'on' if used_vision else 'off (deterministic)'}"
+                      f"{', converged early' if converged else ''}")
+        table = Table(title="Refinement Rounds", show_header=True)
+        table.add_column("Round")
+        table.add_column("Best")
+        table.add_column("Total", justify="right")
+        table.add_column("Deterministic", justify="right")
+        table.add_column("Vision", justify="right")
+        table.add_column("Critique Applied")
+        for r in report.rounds:
+            rc = next((c for c in r.candidates if c.id == r.best_id), r.candidates[0] if r.candidates else None)
+            table.add_row(
+                str(r.index),
+                r.best_id,
+                f"{rc.total:.3f}" if rc else "-",
+                f"{rc.det_score:.3f}" if rc else "-",
+                f"{rc.vision_overall:.3f}" if rc and rc.vision else "-",
+                ", ".join(r.suggestions_applied) or "-",
+            )
+        console.print(table)
+    else:
+        result = pixelize(args.image, args.palette, params)
+        out_path = Path(args.out) if args.out else Path(args.image).with_name(Path(args.image).stem + ".pixel.png")
+        result.image.save(out_path)
+        preview_path = None
+        preview_scale_used = args.preview_scale or _auto_preview_scale(result.image.size)
+        if not args.no_preview:
+            preview_path = out_path.with_name(out_path.stem + ".preview.png")
+            result.image.resize(
+                (result.image.width * preview_scale_used, result.image.height * preview_scale_used), Image.NEAREST
+            ).save(preview_path)
+        used_params = result.params
+        det_metrics = {}
+        vision_notes = ""
+        converged = False
+        used_vision = False
+        final_verdict = None
+        if args.open:
+            open_file(out_path)
+        if args.json:
+            print(json.dumps({
+                "output": str(out_path),
+                "preview": str(preview_path) if preview_path else None,
+                "params": used_params.model_dump(),
+                "palette": result.palette_hex,
+                "usage": [{"hex": h, "count": c} for h, c in result.usage],
+                "source_size": list(result.source_size),
+                "output_size": [result.image.width, result.image.height],
+            }, indent=2))
+            return 0
+
+    console.print(f"[bold green]Saved:[/] {out_path}")
+    if preview_path:
+        console.print(f"Preview (x{preview_scale_used}): {preview_path}")
+    console.print(f"Params: width={used_params.width} downscale={used_params.downscale} dither={used_params.dither}"
+                  f" (strength {used_params.dither_strength}) pre_blur={used_params.pre_blur}"
+                  f" sat={used_params.saturation:.2f} bright={used_params.brightness:.2f} contrast={used_params.contrast:.2f}")
+    if det_metrics:
+        console.print(f"Deterministic: score={det_metrics.get('score', 0):.3f} "
+                      f"mean_dE={det_metrics.get('delta_mean', 0):.4f} coverage={det_metrics.get('coverage', 0):.2f}")
+    if vision_notes:
+        console.print(f"Vision notes: {escape(vision_notes)}")
+    if final_verdict:
+        console.print(f"Jev verdict: action=[bold yellow]{final_verdict.get('recommended_action', '-').upper()}[/] "
+                      f"({final_verdict.get('production_ready_prob', 0) * 100:.0f}% ready)")
+    return 0
 
 
 def cmd_judge_still(args: argparse.Namespace) -> int:
@@ -279,6 +412,38 @@ def main() -> None:
     p_edit.add_argument("--palette", default="luap-40", help="Palette swatches to load into Aseprite")
     p_edit.add_argument("--timeout", type=int, default=1800, help="Seconds to watch for saves")
     p_edit.set_defaults(func=cmd_edit)
+
+    # pixelize
+    p_pix = subparsers.add_parser("pixelize", help="Reduce any image to palette-snapped pixel art (lospec slugs supported)")
+    p_pix.add_argument("image", help="Path to source image (any resolution)")
+    p_pix.add_argument("--palette", default="luap-40", help="Palette: builtin name, lospec slug (e.g. 'na16'), lospec:<slug>, or file")
+    p_pix.add_argument("--width", type=int, help="Target pixel width (height derived from aspect)")
+    p_pix.add_argument("--height", type=int, help="Target pixel height")
+    p_pix.add_argument("--scale", type=int, help="Divide source size by this factor (e.g. 8 -> 1/8 size)")
+    p_pix.add_argument("--downscale", choices=["lanczos", "box", "nearest", "dominant"], default="lanczos",
+                       help="Downscale method; 'dominant' snaps full-res then majority-votes per cell")
+    p_pix.add_argument("--dither", choices=["none", "bayer2", "bayer4", "bayer8", "floyd", "sierra"], default="none")
+    p_pix.add_argument("--strength", type=float, default=1.0, help="Dither strength (0..1.5)")
+    p_pix.add_argument("--pre-blur", type=float, default=0.0, help="Gaussian blur radius before downscale")
+    p_pix.add_argument("--saturation", type=float, default=1.0, help="Pre-snap saturation multiplier")
+    p_pix.add_argument("--brightness", type=float, default=1.0, help="Pre-snap brightness multiplier")
+    p_pix.add_argument("--contrast", type=float, default=1.0, help="Pre-snap contrast multiplier")
+    p_pix.add_argument("--max-colors", type=int, help="Pre-quantize to K colors (k-means) before snapping")
+    p_pix.add_argument("--no-guards", action="store_true", help="Disable grey/hue snap guards")
+    p_pix.add_argument("--alpha", choices=["threshold", "keep", "opaque"], default="threshold",
+                       help="Alpha handling: threshold 128, keep original, or flatten opaque")
+    p_pix.add_argument("--out", help="Output PNG path (default <stem>.pixel.png next to source)")
+    p_pix.add_argument("--preview-scale", type=int, help="Nearest-neighbor upscale factor for the preview PNG")
+    p_pix.add_argument("--no-preview", action="store_true", help="Skip the preview PNG")
+    p_pix.add_argument("--refine", action="store_true", help="Iteratively tune parameters (vision-guided when --vision)")
+    p_pix.add_argument("--rounds", type=int, default=4, help="Max refinement rounds (default 4)")
+    p_pix.add_argument("--session-dir", help="Refinement session directory (default <stem>_pixelize)")
+    p_pix.add_argument("--vision", action="store_true", help="Judge candidates with the OpenRouter vision model (needs OPENROUTER_API_KEY)")
+    p_pix.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
+    p_pix.add_argument("--desc", help="Subject description for the vision judge")
+    p_pix.add_argument("--open", action="store_true", help="Open the result in Aseprite")
+    p_pix.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_pix.set_defaults(func=cmd_pixelize)
 
     # mcp server
     p_mcp = subparsers.add_parser("mcp", help="Start spritewarden Model Context Protocol (MCP) server")

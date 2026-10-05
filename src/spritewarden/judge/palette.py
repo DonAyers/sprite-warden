@@ -2,12 +2,16 @@
 
 import json
 import math
+import os
 import re
 from collections import Counter
 from pathlib import Path
 from PIL import Image
 
 from .models import GateResult
+
+LOSPEC_JSON_URL = "https://lospec.com/palette-list/{slug}.json"
+SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 # Luap-40 Plus palette (canonical 47-color palette from theme/luap-40.tres)
 LUAP_40_PLUS_HEX = [
@@ -48,8 +52,52 @@ def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
+def lospec_cache_dir() -> Path:
+    """Directory where fetched lospec palettes are cached (override with SPRITEWARDEN_PALETTE_CACHE)."""
+    override = os.environ.get("SPRITEWARDEN_PALETTE_CACHE")
+    if override:
+        return Path(override)
+    return Path.home() / ".spritewarden" / "palettes"
+
+
+def fetch_lospec_palette(
+    slug: str,
+    refresh: bool = False,
+    timeout: float = 10.0,
+) -> list[str]:
+    """Fetch a palette's hex colors from lospec.com by slug, caching locally.
+
+    Lospec serves `https://lospec.com/palette-list/<slug>.json` as a JSON array of hex strings.
+    """
+    slug = slug.strip().lower()
+    if not SLUG_RE.match(slug):
+        raise ValueError(f"Invalid lospec slug: {slug!r}")
+    cache = lospec_cache_dir() / f"{slug}.json"
+    if cache.exists() and not refresh:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        return [h.lower() for h in data]
+    import httpx
+
+    resp = httpx.get(
+        LOSPEC_JSON_URL.format(slug=slug),
+        headers={"User-Agent": "spritewarden (palette fetch)"},
+        timeout=timeout,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and "colors" in data:
+        data = data["colors"]
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"Unexpected lospec payload for '{slug}'")
+    hexes = [str(h).lower() for h in data]
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(hexes), encoding="utf-8")
+    return hexes
+
+
 def load_palette(source: str | Path | list[str] | list[tuple[int, int, int]] | None = None) -> list[tuple[int, int, int]]:
-    """Load a list of RGB tuples from a named preset, json file, godot .tres, or hex list."""
+    """Load a list of RGB tuples from a named preset, lospec slug, json file, godot .tres, or hex list."""
     if source is None:
         source = "luap-40"
     if isinstance(source, str) and source.lower() in BUILTIN_PALETTES:
@@ -61,6 +109,23 @@ def load_palette(source: str | Path | list[str] | list[tuple[int, int, int]] | N
         if isinstance(source[0], str):
             return [hex_to_rgb(h) for h in source]
         return source  # type: ignore
+
+    # Lospec by slug: either "lospec:<slug>" or a bare slug that is not a builtin, path, or file.
+    if isinstance(source, str):
+        text = source.strip()
+        low = text.lower()
+        slug: str | None = None
+        if low.startswith("lospec:"):
+            slug = low[len("lospec:"):]
+        elif SLUG_RE.match(low) and "/" not in text and "\\" not in text and "." not in text:
+            slug = low
+        if slug is not None:
+            try:
+                return [hex_to_rgb(h) for h in fetch_lospec_palette(slug)]
+            except Exception as exc:  # noqa: BLE001 - normalized to FileNotFoundError below
+                raise FileNotFoundError(
+                    f"Palette '{source}' is not a builtin and could not be fetched from lospec: {exc}"
+                ) from exc
 
     path = Path(source)
     if not path.exists():
