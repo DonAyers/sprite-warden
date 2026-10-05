@@ -16,6 +16,7 @@ from .repo.identity import CharacterIdentity
 from .repo.palette import registry as palettes
 from .reducer import ReduceParams, pixelize, refine
 from .router import PipelineRouter
+from .learning import cli as learning_cli
 
 console = Console()
 
@@ -448,6 +449,9 @@ def main() -> None:
     # mcp server
     p_mcp = subparsers.add_parser("mcp", help="Start spritewarden Model Context Protocol (MCP) server")
     p_mcp.set_defaults(func=lambda _: run_mcp())
+
+    # learn (self-improvement knowledge base)
+    learning_cli.register(subparsers)
 
     args = parser.parse_args()
     sys.exit(args.func(args))
