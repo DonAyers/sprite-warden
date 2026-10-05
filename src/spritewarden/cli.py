@@ -60,6 +60,14 @@ def cmd_pixelize(args: argparse.Namespace) -> int:
             vision_model=args.vision_model,
             description=args.desc or "",
         )
+        if args.learn:
+            from .learning.db import LearningDB
+            from .learning.episodes import record_from_refine
+
+            try:
+                record_from_refine(LearningDB(), report)
+            except Exception as exc:
+                console.print(f"[dim]Learning record skipped: {exc}[/]")
         out_path = Path(args.out) if args.out else Path(report.best_image)
         if Path(report.best_image) != out_path:
             out_path.write_bytes(Path(report.best_image).read_bytes())
@@ -443,6 +451,7 @@ def main() -> None:
     p_pix.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_pix.add_argument("--desc", help="Subject description for the vision judge")
     p_pix.add_argument("--open", action="store_true", help="Open the result in Aseprite")
+    p_pix.add_argument("--learn", action="store_true", help="Record the refine run as a learning episode")
     p_pix.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_pix.set_defaults(func=cmd_pixelize)
 

@@ -77,6 +77,7 @@ class PipelineRouter:
                 palette_id=palette_id,
                 perspective=perspective,
             )
+            self._attach_learned_rules(delib.recipe, asset_type, perspective)
             return TriageRoutingResult(
                 action="generate_new",
                 recipe=delib.recipe,
@@ -94,9 +95,25 @@ class PipelineRouter:
             is_vehicle_or_rigid=is_vehicle_or_rigid,
         )
         recipe.palette_id = palette_id
+        self._attach_learned_rules(recipe, asset_type, perspective)
 
         return TriageRoutingResult(
             action="generate_new",
             recipe=recipe,
             explanation=f"Routed to {recipe.provider} ({recipe.operation}) using proven Playbook constraints.",
         )
+
+    @staticmethod
+    def _attach_learned_rules(recipe: GenerationRecipe, asset_type: str, perspective: str) -> None:
+        """Append rules from approved (active) learned strategies for this scope, best-effort."""
+        try:
+            from ..learning.curation import active_rules_for, scope_key
+            from ..learning.taxonomy import normalize_perspective
+
+            canonical = normalize_perspective(perspective).canonical or perspective
+            key = scope_key(recipe.provider, recipe.operation, asset_type, canonical)
+            rules = active_rules_for(key)
+            if rules:
+                recipe.rules = list(recipe.rules) + rules
+        except Exception:
+            pass

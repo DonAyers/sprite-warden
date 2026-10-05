@@ -163,6 +163,75 @@ def cmd_proposals(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reflect(args: argparse.Namespace) -> int:
+    from .curation import derive
+
+    db = LearningDB()
+    proposals = derive(db, min_evidence=args.min_evidence, use_llm=args.llm)
+    if args.json:
+        _emit(args, {"created": [p.model_dump() for p in proposals]})
+        return 0
+    if not proposals:
+        console.print("[dim]No new proposals (need enough evidence in a scope).[/]")
+        return 0
+    table = Table(title=f"New Proposals ({len(proposals)})")
+    for col in ("ID", "Kind", "Target", "What"):
+        table.add_column(col)
+    for p in proposals:
+        table.add_row(str(p.id), p.kind, p.target, escape(p.what))
+    console.print(table)
+    console.print("[yellow]Review with `warden learn proposals`, apply with `warden learn approve <id>`.[/]")
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    from .proposals import review
+
+    db = LearningDB()
+    proposal = review(db, args.id, True)
+    if not proposal:
+        console.print(f"[red]Proposal {args.id} not found.[/]")
+        return 1
+    console.print(f"[bold green]Approved[/] proposal {args.id} ({proposal.kind} -> {proposal.target})")
+    return 0
+
+
+def cmd_reject(args: argparse.Namespace) -> int:
+    from .proposals import review
+
+    db = LearningDB()
+    proposal = review(db, args.id, False)
+    if not proposal:
+        console.print(f"[red]Proposal {args.id} not found.[/]")
+        return 1
+    console.print(f"[bold yellow]Rejected[/] proposal {args.id} ({proposal.kind})")
+    return 0
+
+
+def cmd_record_episode(args: argparse.Namespace) -> int:
+    from .models import Episode
+    from .taxonomy import normalize_perspective
+
+    db = LearningDB()
+    perspective = normalize_perspective(args.perspective).canonical or args.perspective
+    episode = Episode(
+        game=args.game,
+        asset_type=args.asset_type,
+        perspective=perspective,
+        provider=args.provider,
+        operation=args.operation,
+        outcome=args.outcome,
+        reason=args.reason or "",
+        asset_id=args.asset_id,
+    )
+    eid = db.insert_episode(episode)
+    if args.json:
+        _emit(args, {"episode_id": eid})
+        return 0
+    console.print(f"[bold green]Recorded episode[/] {eid} ({args.provider}/{args.operation} -> {args.outcome})")
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "learn",
@@ -225,3 +294,31 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     pp.add_argument("--limit", type=int, default=30)
     pp.add_argument("--json", action="store_true")
     pp.set_defaults(func=cmd_proposals)
+
+    pr = learn.add_parser("reflect", help="Derive strategy proposals from recorded episodes")
+    pr.add_argument("--min-evidence", type=int, default=3, help="Minimum episodes per scope (default 3)")
+    pr.add_argument("--llm", action="store_true", help="Use the capped LLM reflection (default: deterministic)")
+    pr.add_argument("--json", action="store_true")
+    pr.set_defaults(func=cmd_reflect)
+
+    pa = learn.add_parser("approve", help="Approve a proposal and apply it to the registry")
+    pa.add_argument("id", type=int)
+    pa.add_argument("--json", action="store_true")
+    pa.set_defaults(func=cmd_approve)
+
+    pj = learn.add_parser("reject", help="Reject a proposal")
+    pj.add_argument("id", type=int)
+    pj.add_argument("--json", action="store_true")
+    pj.set_defaults(func=cmd_reject)
+
+    pre = learn.add_parser("record-episode", help="Record a generation/judge attempt")
+    pre.add_argument("--provider", required=True)
+    pre.add_argument("--operation", required=True)
+    pre.add_argument("--outcome", required=True, choices=["accepted", "rejected", "rerolled", "pending"])
+    pre.add_argument("--asset-type", default="sprite")
+    pre.add_argument("--perspective", default="unknown")
+    pre.add_argument("--game", default="global")
+    pre.add_argument("--reason", default="")
+    pre.add_argument("--asset-id")
+    pre.add_argument("--json", action="store_true")
+    pre.set_defaults(func=cmd_record_episode)
