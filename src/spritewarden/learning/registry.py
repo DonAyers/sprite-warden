@@ -49,14 +49,6 @@ SEED_SOURCES: list[Source] = [
         notes="Retro Diffusion docs index (rd_* endpoint guidance).",
     ),
     Source(
-        id="lospec_docs",
-        provider="lospec",
-        kind="llms_txt",
-        url="https://lospec.com/llms.txt",
-        cadence_s=172800,
-        notes="Lospec palette ecosystem docs.",
-    ),
-    Source(
         id="aseprite_releases",
         provider="aseprite",
         kind="rss",

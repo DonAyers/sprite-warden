@@ -10,9 +10,11 @@ from typing import Callable
 
 from .db import LearningDB
 from .diffing import analyze_change, content_hash, deterministic_summary
-from .models import DocEvent, Snapshot, Source, utcnow
+from .mcp_probe import normalize_tools, probe_source
+from .models import DocEvent, ProviderTool, Snapshot, Source, utcnow
 
 FetchFn = Callable[..., "FetchResult"]
+McpProbeFn = Callable[[Source], "list[dict] | None"]
 
 
 @dataclass
@@ -96,12 +98,13 @@ def check_source(
     source: Source,
     db: LearningDB,
     fetch_fn: FetchFn | None = None,
+    mcp_probe_fn: McpProbeFn | None = None,
 ) -> list[DocEvent]:
     """Fetch one source, snapshot it, and return any detected DocEvents."""
     if not source.enabled:
         return []
     if source.kind == "mcp_tools":
-        return []
+        return _check_mcp_source(source, db, mcp_probe_fn)
 
     result = fetch(source.url, etag=source.etag, last_modified=source.last_modified, fetch_fn=fetch_fn)
     now = utcnow()
@@ -129,6 +132,9 @@ def check_source(
             extracted={"length": len(extracted)},
         )
     )
+    if prev is None:
+        db.update_source_fetch_state(source.id, result.etag, result.last_modified, new_hash, now)
+        return []
 
     old_body = prev.body if prev else ""
     is_json = source.kind in ("json_api", "openapi")
@@ -166,11 +172,86 @@ def _safe_json(text: str):
         return None
 
 
+def _check_mcp_source(
+    source: Source,
+    db: LearningDB,
+    mcp_probe_fn: McpProbeFn | None = None,
+) -> list[DocEvent]:
+    """Probe an MCP server's tools/list and diff it, recording provider_tools observations."""
+    probe = mcp_probe_fn or probe_source
+    try:
+        tools = probe(source)
+    except Exception:
+        tools = None
+    if tools is None:
+        return []
+
+    normalized = normalize_tools(tools)
+    now = utcnow()
+    new_hash = content_hash(normalized)
+    if new_hash == source.last_hash:
+        db.update_source_fetch_state(source.id, source.etag, source.last_modified, new_hash, now)
+        return []
+
+    prev = db.latest_snapshot(source.id)
+    db.insert_snapshot(
+        Snapshot(
+            source_id=source.id, fetched_at=now, http_status=200,
+            content_hash=new_hash, body=normalized, extracted={"tools": len(tools)},
+        )
+    )
+    if prev is None:
+        db.update_source_fetch_state(source.id, source.etag, source.last_modified, new_hash, now)
+        for tool in tools:
+            _record_tool(db, source, tool, now, None)
+        return []
+
+    old_body = prev.body if prev else ""
+    record = analyze_change(old_body, normalized, _safe_json(old_body), _safe_json(normalized), name=source.id)
+    events: list[DocEvent] = []
+    if record:
+        what, how, why = deterministic_summary(record, source)
+        event = DocEvent(
+            source_id=source.id, provider=source.provider, detected_at=now,
+            change_kind=record["change_kind"], significance=record["significance"],
+            signals=record["signals"], diff_text=record["diff_text"][:20000],
+            summary_what=what, summary_how=how, summary_why=why,
+        )
+        event.id = db.insert_event(event)
+        events.append(event)
+
+    event_id = events[0].id if events else None
+    for tool in tools:
+        _record_tool(db, source, tool, now, event_id)
+
+    db.update_source_fetch_state(source.id, source.etag, source.last_modified, new_hash, now)
+    return events
+
+
+def _record_tool(db: LearningDB, source: Source, tool: dict, observed_at: str, event_id: int | None) -> None:
+    name = tool.get("name")
+    if not name:
+        return
+    description = str(tool.get("description", ""))
+    db.upsert_tool(
+        ProviderTool(
+            provider=source.provider,
+            tool_name=str(name),
+            capability_json=json.dumps({"description": description}, sort_keys=True),
+            params_json=json.dumps(tool.get("inputSchema") or tool.get("input_schema") or {}, sort_keys=True),
+            deprecations_json=json.dumps(["deprecated"] if "deprecat" in description.lower() else []),
+            observed_at=observed_at,
+            source_event_id=event_id,
+        )
+    )
+
+
 def check_all(
     db: LearningDB,
     provider: str | None = None,
     source_id: str | None = None,
     fetch_fn: FetchFn | None = None,
+    mcp_probe_fn: McpProbeFn | None = None,
     limit: int | None = None,
 ) -> list[DocEvent]:
     """Check enabled sources (optionally filtered) and collect all detected events."""
@@ -181,5 +262,5 @@ def check_all(
         sources = sources[:limit]
     events: list[DocEvent] = []
     for source in sources:
-        events.extend(check_source(source, db, fetch_fn=fetch_fn))
+        events.extend(check_source(source, db, fetch_fn=fetch_fn, mcp_probe_fn=mcp_probe_fn))
     return events

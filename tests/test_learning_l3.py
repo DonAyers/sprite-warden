@@ -27,13 +27,14 @@ def test_scheduler_due_and_run_once(tmp_path: Path):
     db = LearningDB(tmp_path / "l.db")
     doc = tmp_path / "doc.md"
     doc.write_text("v1", encoding="utf-8")
-    db.upsert_source(Source(id="d", provider="acme", kind="md", url=str(doc)))
+    db.upsert_source(Source(id="d", provider="acme", kind="md", url=str(doc), cadence_s=0))
     scheduler = LearningScheduler(db=db)
 
     assert [s.id for s in scheduler.due_sources()] == ["d"]
+    assert scheduler.run_once() == []  # baseline snapshot, no false event
+    doc.write_text("v2 changed", encoding="utf-8")
     events = scheduler.run_once()
-    assert len(events) == 1 and events[0].change_kind == "added"
-    assert scheduler.due_sources() == []  # just checked within cadence
+    assert len(events) == 1 and events[0].change_kind == "changed"
 
 
 def test_scheduler_seeds_when_empty(tmp_path: Path):

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .db import DEFAULT_DB_PATH, LearningDB
+from .diffing import REVIEW_THRESHOLD
 from .models import Proposal, Strategy, utcnow
 from .proposals import create_proposal
 from .summarize import reflect_cluster
@@ -156,3 +157,30 @@ def active_rules_for(scope_key_value: str, db: LearningDB | None = None) -> list
             return []
         db = LearningDB(path)
     return [f"[learned] {s.how}" for s in db.list_strategies(scope_key=scope_key_value, status="active")]
+
+
+def proposals_from_events(db: LearningDB, min_significance: float = REVIEW_THRESHOLD) -> list[Proposal]:
+    """Create reviewable proposals for significant new doc/tool changes (idempotent)."""
+    created: list[Proposal] = []
+    for event in db.list_events(limit=1000, review_state="new"):
+        if event.significance < min_significance or event.id is None:
+            continue
+        proposal = Proposal(
+            kind="review_doc_change",
+            target=f"doc_event:{event.id}",
+            what=event.summary_what,
+            how=event.summary_how or "Review the changed provider surface and update strategies if relevant.",
+            why=event.summary_why,
+            evidence={
+                "event_id": event.id,
+                "source_id": event.source_id,
+                "provider": event.provider,
+                "signals": event.signals,
+                "significance": event.significance,
+            },
+        )
+        pid = create_proposal(db, proposal)
+        if pid is not None:
+            proposal.id = pid
+            created.append(proposal)
+    return created

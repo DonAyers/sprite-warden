@@ -107,19 +107,23 @@ def test_db_episodes_and_budget(tmp_path: Path):
 
 # --- acquisition ---
 
-def test_check_source_file_added_then_unchanged(tmp_path: Path):
+def test_check_source_file_baseline_then_change(tmp_path: Path):
     db = LearningDB(tmp_path / "l.db")
     doc = tmp_path / "doc.md"
     doc.write_text("# Docs\nversion 1\n", encoding="utf-8")
     src = Source(id="docs", provider="acme", kind="md", url=str(doc))
     db.upsert_source(src)
 
-    events = check_source(db.get_source("docs"), db)
-    assert len(events) == 1
-    assert events[0].change_kind == "added"
+    # First check establishes a baseline (no false "added" event).
+    assert check_source(db.get_source("docs"), db) == []
+    assert db.latest_snapshot("docs") is not None
 
-    again = check_source(db.get_source("docs"), db)
-    assert again == []
+    # Unchanged -> no event.
+    assert check_source(db.get_source("docs"), db) == []
+
+    doc.write_text("# Docs\nversion 2\n", encoding="utf-8")
+    events = check_source(db.get_source("docs"), db)
+    assert len(events) == 1 and events[0].change_kind == "changed"
 
 
 def test_check_source_detects_modification(tmp_path: Path):
@@ -169,6 +173,8 @@ def test_check_all_filters_by_provider(tmp_path: Path):
     b.write_text("b", encoding="utf-8")
     db.upsert_source(Source(id="a", provider="acme", kind="md", url=str(a)))
     db.upsert_source(Source(id="b", provider="other", kind="md", url=str(b)))
+    check_all(db)  # establish baselines
+    a.write_text("a changed", encoding="utf-8")
     events = check_all(db, provider="acme")
     assert {e.source_id for e in events} == {"a"}
 

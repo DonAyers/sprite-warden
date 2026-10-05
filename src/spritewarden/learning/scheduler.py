@@ -40,11 +40,13 @@ class LearningScheduler:
         db: LearningDB | None = None,
         interval_s: int | None = None,
         fetch_fn: FetchFn | None = None,
+        mcp_probe_fn=None,
         jitter: float = 0.1,
     ):
         self.db = db or LearningDB()
         self.interval_s = interval_s if interval_s is not None else int(os.environ.get("SPRITEWARDEN_LEARN_INTERVAL", "3600"))
         self.fetch_fn = fetch_fn
+        self.mcp_probe_fn = mcp_probe_fn
         self.jitter = jitter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -60,7 +62,7 @@ class LearningScheduler:
             seed_sources(self.db)
         events: list[DocEvent] = []
         for source in self.due_sources():
-            events.extend(check_source(source, self.db, fetch_fn=self.fetch_fn))
+            events.extend(check_source(source, self.db, fetch_fn=self.fetch_fn, mcp_probe_fn=self.mcp_probe_fn))
 
         if llm_enabled() and events:
             for event in events:
@@ -72,6 +74,11 @@ class LearningScheduler:
                     self.db.update_event_summary(event.id, what, how, why, DEFAULT_LEARN_MODEL)
                     event.summary_what, event.summary_how, event.summary_why = what, how, why
                     event.model = DEFAULT_LEARN_MODEL
+
+        if events:
+            from .curation import proposals_from_events
+
+            proposals_from_events(self.db)
         return events
 
     def start(self, daemon: bool = True) -> "LearningScheduler":

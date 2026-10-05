@@ -71,13 +71,17 @@ def cmd_add_source(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    from .curation import proposals_from_events
+
     db = LearningDB()
     if not db.list_sources():
         seed_sources(db)
         console.print("[dim]No sources registered; seeded the built-in provider set.[/]")
     events = check_all(db, provider=args.provider, source_id=args.source, limit=args.max)
+    proposals = proposals_from_events(db)
     if args.json:
-        _emit(args, {"checked": True, "events": [e.model_dump() for e in events]})
+        _emit(args, {"checked": True, "events": [e.model_dump() for e in events],
+                     "proposals": [p.model_dump() for p in proposals]})
         return 0
     if not events:
         console.print("[bold green]No changes detected.[/]")
@@ -92,7 +96,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     for e in events:
         table.add_row(str(e.id), e.source_id, e.change_kind, f"{e.significance:.2f}", ", ".join(e.signals) or "-", escape(e.summary_what))
     console.print(table)
-    console.print(f"[yellow]Stored {len(events)} doc_events. Review with `warden learn events`.[/]")
+    console.print(f"[yellow]Stored {len(events)} doc_events; {len(proposals)} new proposal(s). Review with `warden learn proposals`.[/]")
     return 0
 
 

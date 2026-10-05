@@ -54,6 +54,14 @@ def _added_lines(old: str, new: str) -> list[str]:
     return added
 
 
+def _list_key(old: list, new: list) -> str | None:
+    for key in ("name", "id"):
+        items = [i for i in (list(old) + list(new)) if isinstance(i, dict)]
+        if items and all(key in i for i in items):
+            return key
+    return None
+
+
 def json_structural_diff(old: Any, new: Any, path: str = "") -> list[str]:
     """Recursively diff JSON, returning human-readable structural signal strings."""
     out: list[str] = []
@@ -65,7 +73,17 @@ def json_structural_diff(old: Any, new: Any, path: str = "") -> list[str]:
         for key in old.keys() & new.keys():
             out.extend(json_structural_diff(old[key], new[key], f"{path}{key}."))
     elif isinstance(old, list) and isinstance(new, list):
-        if old != new:
+        key = _list_key(old, new)
+        if key:
+            om = {str(i[key]): i for i in old if isinstance(i, dict) and key in i}
+            nm = {str(i[key]): i for i in new if isinstance(i, dict) and key in i}
+            for k in om.keys() - nm.keys():
+                out.append(f"removed {path}{k}")
+            for k in nm.keys() - om.keys():
+                out.append(f"added {path}{k}")
+            for k in om.keys() & nm.keys():
+                out.extend(json_structural_diff(om[k], nm[k], f"{path}{k}."))
+        elif old != new:
             out.append(f"changed {path or '<root>'} (list len {len(old)} -> {len(new)})")
     elif old != new:
         out.append(f"changed {path.rstrip('.') or '<root>'}")
