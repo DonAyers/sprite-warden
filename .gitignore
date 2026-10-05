@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Local data / caches
+data/*.db
+data/*.db-*
+data/learning.db
+data/thumbs/
+.spritewarden/
+
+# Managed art store working files (future gallery)
+assets/**/.aseprite_work/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
