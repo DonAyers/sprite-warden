@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS budget (
     cap_usd REAL DEFAULT 5.0,
     cap_calls INTEGER DEFAULT 500
 );
+
+CREATE TABLE IF NOT EXISTS tip_exports (
+    strategy_id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    exported_at TEXT NOT NULL,
+    tip_ref TEXT
+);
 """
 
 
@@ -302,6 +309,13 @@ class LearningDB:
     def set_event_review(self, event_id: int, review_state: str) -> None:
         with self._get_conn() as conn:
             conn.execute("UPDATE doc_events SET review_state = ? WHERE id = ?", (review_state, event_id))
+
+    def update_event_summary(self, event_id: int, what: str, how: str, why: str, model: str) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE doc_events SET summary_what = ?, summary_how = ?, summary_why = ?, model = ? WHERE id = ?",
+                (what, how, why, model, event_id),
+            )
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> DocEvent:
@@ -551,3 +565,26 @@ class LearningDB:
                 "UPDATE budget SET spend_usd = spend_usd + ?, calls = calls + ? WHERE period = ?",
                 (usd, calls, period),
             )
+
+    # --- Tipshare export tracking ---
+
+    def record_tip_export(self, strategy_id: str, topic: str, tip_ref: str | None, exported_at: str) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO tip_exports (strategy_id, topic, exported_at, tip_ref)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(strategy_id) DO UPDATE SET
+                       topic=excluded.topic, exported_at=excluded.exported_at, tip_ref=excluded.tip_ref""",
+                (strategy_id, topic, exported_at, tip_ref),
+            )
+
+    def is_tip_exported(self, strategy_id: str) -> bool:
+        with self._get_conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM tip_exports WHERE strategy_id = ?", (strategy_id,)
+            ).fetchone() is not None
+
+    def list_tip_exports(self) -> list[dict[str, Any]]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT * FROM tip_exports ORDER BY exported_at DESC").fetchall()
+            return [dict(r) for r in rows]

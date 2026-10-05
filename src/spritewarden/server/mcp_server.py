@@ -1,5 +1,6 @@
 """MCP server exposing slaygent art repository, QA judges, and smart routing to agents."""
 
+import json
 from pathlib import Path
 from typing import Annotated
 from mcp.server.mcpserver import MCPServer
@@ -13,6 +14,12 @@ from ..repo.identity import CharacterIdentity
 from ..repo.palette import registry as palettes
 from ..reducer import ReduceParams, pixelize, refine
 from ..router import PipelineRouter
+from ..learning.db import LearningDB
+from ..learning.doctor import report as learn_report
+from ..learning.episodes import record_episode as _record_episode
+from ..learning.models import Episode
+from ..learning.proposals import review as _review_proposal
+from ..learning.taxonomy import normalize_perspective
 
 catalog = AssetCatalog()
 router = PipelineRouter(catalog=catalog)
@@ -27,6 +34,9 @@ Use it to:
 5. Validate animations for temporal specks, spikes, and loop stutter (`judge_animation`).
 6. Reduce any artwork to a pixel palette render, AI-refined on request (`pixelize_image`).
 7. Open sprites and sheets in Aseprite for visual inspection (`open_in_aseprite`).
+8. Consult the self-learning knowledge base: live resources `spritewarden://playbook`,
+   `spritewarden://proposals`, `spritewarden://providers`, `spritewarden://learn-status`;
+   tools `learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`.
 """
 
 mcp = MCPServer("spritewarden", instructions=INSTRUCTIONS)
@@ -218,5 +228,93 @@ def pixelize_image(
     return report.model_dump()
 
 
+# ---------------------------------------------------------------------------
+# Learning subsystem: live resources (always-current strategy state)
+# ---------------------------------------------------------------------------
+
+
+@mcp.resource("spritewarden://playbook", name="playbook", description="Active learned strategies", mime_type="application/json")
+def resource_playbook() -> str:
+    """Approved (active) strategies the router can apply, grouped by scope."""
+    db = LearningDB()
+    return json.dumps({"strategies": [s.model_dump() for s in db.list_strategies(status="active")]}, indent=2)
+
+
+@mcp.resource("spritewarden://proposals", name="proposals", description="Open learned-change proposals awaiting review", mime_type="application/json")
+def resource_proposals() -> str:
+    db = LearningDB()
+    return json.dumps({"proposals": [p.model_dump() for p in db.list_proposals(status="open")]}, indent=2)
+
+
+@mcp.resource("spritewarden://providers", name="providers", description="Observed provider tools, limits, and watched sources", mime_type="application/json")
+def resource_providers() -> str:
+    db = LearningDB()
+    return json.dumps(
+        {
+            "sources": [s.model_dump() for s in db.list_sources()],
+            "tools": [t.model_dump() for t in db.list_tools()],
+        },
+        indent=2,
+    )
+
+
+@mcp.resource("spritewarden://learn-status", name="learn-status", description="Learning knowledge-base health and staleness", mime_type="application/json")
+def resource_learn_status() -> str:
+    return json.dumps(learn_report(LearningDB()), indent=2)
+
+
+@mcp.tool()
+def learn_status() -> dict:
+    """Report learning knowledge-base health: sources, events, episodes, strategies, proposals, budget."""
+    return learn_report(LearningDB())
+
+
+@mcp.tool()
+def list_learned_proposals(
+    status: Annotated[str, Field(description="open / approved / rejected (default: open)")] = "open",
+) -> dict:
+    """List self-improvement proposals (never auto-applied; review before acting)."""
+    db = LearningDB()
+    return {"proposals": [p.model_dump() for p in db.list_proposals(status=status)]}
+
+
+@mcp.tool()
+def approve_learned_proposal(
+    proposal_id: Annotated[int, Field(description="Proposal id to approve or reject")],
+    approve: Annotated[bool, Field(description="True to approve (applies change), False to reject")] = True,
+) -> dict:
+    """Approve/reject a learned proposal; approval activates a strategy or acknowledges a doc change."""
+    proposal = _review_proposal(LearningDB(), proposal_id, approve)
+    if proposal is None:
+        return {"status": "error", "error": f"proposal {proposal_id} not found"}
+    return {"status": "ok", "proposal": proposal.model_dump()}
+
+
+@mcp.tool()
+def record_learning_episode(
+    provider: Annotated[str, Field(description="Generation provider, e.g. pixellab, sprite_fusion, pixelize")],
+    operation: Annotated[str, Field(description="Operation, e.g. create_character_v3, direction-set, refine")],
+    outcome: Annotated[str, Field(description="accepted / rejected / rerolled / pending")],
+    asset_type: Annotated[str, Field(description="character, vehicle, tileset, props, icon")] = "sprite",
+    perspective: Annotated[str, Field(description="top-down / angled-top-down / side-on / isometric")] = "unknown",
+    game: Annotated[str, Field(description="Project slug")] = "global",
+    reason: Annotated[str, Field(description="Why it succeeded/failed (evidence)")] = "",
+) -> dict:
+    """Record a generation attempt's outcome as a learning episode (the reward signal)."""
+    perspective = normalize_perspective(perspective).canonical or perspective
+    eid = _record_episode(
+        LearningDB(),
+        Episode(provider=provider, operation=operation, outcome=outcome, asset_type=asset_type,
+                perspective=perspective, game=game, reason=reason),
+    )
+    return {"status": "ok", "episode_id": eid}
+
+
 def run_mcp_server() -> None:
+    try:
+        from ..learning.scheduler import LearningScheduler
+
+        LearningScheduler().start(daemon=True)
+    except Exception:
+        pass
     mcp.run()

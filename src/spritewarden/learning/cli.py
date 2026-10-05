@@ -232,6 +232,88 @@ def cmd_record_episode(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from .doctor import report
+
+    db = LearningDB()
+    data = report(db)
+    if args.json:
+        _emit(args, data)
+        return 0
+    console.print(f"[bold cyan]Learning DB:[/] {data['db_path']}  (llm_enabled={data['llm_enabled']})")
+    console.print(
+        f"Sources: {data['sources']['total']} | Events: {data['events']['total']} "
+        f"({data['events']['significant_new']} significant new) | Episodes: {data['episodes']['total']} | "
+        f"Strategies: {data['strategies']['total']} | Open proposals: {data['proposals']['open']}"
+    )
+    console.print(
+        f"Budget: ${data['budget']['spend_usd']:.2f}/${data['budget']['cap_usd']:.2f} "
+        f"({data['budget']['calls']} calls) this {data['budget']['period']}"
+    )
+    if data["warnings"]:
+        console.print("[yellow]Warnings:[/]")
+        for w in data["warnings"]:
+            console.print(f" • {w}")
+    else:
+        console.print("[green]No warnings.[/]")
+    return 0
+
+
+def cmd_export_tips(args: argparse.Namespace) -> int:
+    from .tipshare_bridge import export_tips
+
+    db = LearningDB()
+    payloads = export_tips(db, topic=args.topic, mark=args.mark, include_exported=args.all)
+    if args.json:
+        _emit(args, {"count": len(payloads), "tips": payloads})
+        return 0
+    if not payloads:
+        console.print("[dim]No unexported active strategies.[/]")
+        return 0
+    console.print(f"[bold green]{len(payloads)} tip payload(s)[/] ready for `share_tip` (topic {args.topic}):")
+    for t in payloads:
+        console.print(f" • {escape(t['title'])}")
+    if not args.mark:
+        console.print("[dim]Re-run with --mark to record these as exported.[/]")
+    return 0
+
+
+def cmd_watch_project(args: argparse.Namespace) -> int:
+    from .project_watch import register_project
+
+    db = LearningDB()
+    count = register_project(db, provider=args.provider, root=args.root, patterns=args.pattern or None)
+    if args.json:
+        _emit(args, {"registered": count})
+        return 0
+    console.print(f"[bold green]Registered {count} project files[/] for provider '{args.provider}'.")
+    return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    from .scheduler import LearningScheduler
+
+    scheduler = LearningScheduler()
+    if args.once:
+        events = scheduler.run_once()
+        if args.json:
+            _emit(args, {"events": [e.model_dump() for e in events]})
+            return 0
+        console.print(f"[green]Checked due sources; {len(events)} change(s).[/]")
+        return 0
+    console.print("[dim]Watching provider docs in the background. Ctrl+C to stop.[/]")
+    try:
+        scheduler.start(daemon=False)
+        while scheduler.is_running():
+            import time
+
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        scheduler.stop()
+        console.print("\n[dim]Stopped.[/]")
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "learn",
@@ -322,3 +404,26 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     pre.add_argument("--asset-id")
     pre.add_argument("--json", action="store_true")
     pre.set_defaults(func=cmd_record_episode)
+
+    pd = learn.add_parser("doctor", help="Report knowledge-base health and staleness")
+    pd.add_argument("--json", action="store_true")
+    pd.set_defaults(func=cmd_doctor)
+
+    pt = learn.add_parser("export-tips", help="Emit tipshare `share_tip` payloads for active strategies")
+    pt.add_argument("--topic", default="godot-pixel-art")
+    pt.add_argument("--mark", action="store_true", help="Record these as exported")
+    pt.add_argument("--all", action="store_true", help="Include already-exported strategies")
+    pt.add_argument("--json", action="store_true")
+    pt.set_defaults(func=cmd_export_tips)
+
+    pw = learn.add_parser("watch-project", help="Register a project's palette/config files as watched sources")
+    pw.add_argument("root", help="Project root directory")
+    pw.add_argument("--provider", required=True, help="Project slug used as provider")
+    pw.add_argument("--pattern", action="append", help="Glob pattern (repeatable)")
+    pw.add_argument("--json", action="store_true")
+    pw.set_defaults(func=cmd_watch_project)
+
+    pwa = learn.add_parser("watch", help="Run the background doc watcher (or --once)")
+    pwa.add_argument("--once", action="store_true", help="Check due sources once and exit")
+    pwa.add_argument("--json", action="store_true")
+    pwa.set_defaults(func=cmd_watch)
