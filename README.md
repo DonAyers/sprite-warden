@@ -22,14 +22,15 @@
    - Fast-path routing with Jev to proven provider workflows (PixelLab, Sprite Fusion, Retro Diffusion, OpenRouter Nano Banana 2, SpriteCook).
    - Multi-model deliberation with **OpenRouter Fusion** (`openrouter/fusion`) for novel/untested asset types.
    - Executable provider drivers (`spritewarden generate`) for PixelLab, Sprite Fusion, OpenRouter Image, and SpriteCook.
-5. **Sprite Sheet Builder**:
+5. **Sprite Sheet Builder & Padding**:
+   - `spritewarden pad <files|folder> --size 64`: normalize provider output (varying canvases, art hugging the edges) onto a uniform, ground-aligned canvas — fixed `--size`/`--canvas WxH`, per-frame `--grow N`, align, margin, power-of-two, oversized `--fit clip|shrink`, optional palette snap, batch or `--in-place`.
    - `spritewarden sheet <files|folder> --out sheet.png`: discovers and orders frames (natural sort), snaps them to their implicit pixel grid, palette-locks them, and composes an evenly-celled, ground-aligned spritesheet + JSON manifest.
    - Grid snapping uses the Rust `spritefusion-pixel-snapper` when present, with a pure-Python fallback (grid detection + majority-vote resample + Oklab palette snap) so it never hard-fails.
 6. **Aseprite Integration**:
    - `spritewarden open <path>`: Launch Aseprite immediately for inspection.
    - `spritewarden edit <sheet.png> --cell 64 --palette luap-40`: Interactive editing with auto-export on save and live QA checking.
 7. **Agent MCP Server**:
-   - Tools: `search_art`, `get_character_identity`, `register_character_identity`, `route_generation`, `judge_still`, `judge_animation`, `pixelize_image`, `build_sprite_sheet`, `open_in_aseprite`, `learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`.
+   - Tools: `search_art`, `get_character_identity`, `register_character_identity`, `route_generation`, `judge_still`, `judge_animation`, `pixelize_image`, `pad_sprite`, `build_sprite_sheet`, `open_in_aseprite`, `learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`.
    - Resources: `spritewarden://playbook`, `spritewarden://proposals`, `spritewarden://providers`, `spritewarden://learn-status`.
 
 ## Quick CLI Usage
@@ -55,6 +56,9 @@ spritewarden generate "health potion icon" --type icon --provider spritecook --o
 
 # Combine loose frames/folder into a palette-snapped, evenly-framed spritesheet
 spritewarden sheet assets/sprites/raw --out assets/sprites/walk.png --palette luap-40 --columns 8
+
+# Normalize provider output (varying sizes, edge-hugging art) to uniform 64x64 cells first
+spritewarden pad assets/sprites/raw --size 64 --align bottom-center
 
 # Start the MCP server for AI agents
 spritewarden mcp

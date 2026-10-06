@@ -384,6 +384,44 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0 if output.success else 1
 
 
+def cmd_pad(args: argparse.Namespace) -> int:
+    from .sheet import pad_files
+
+    try:
+        report = pad_files(
+            args.paths,
+            out=args.out,
+            size=args.size,
+            canvas=args.canvas,
+            grow=args.grow,
+            align=args.align,
+            margin=args.margin,
+            power_of_two=args.power_of_two,
+            fit=args.fit,
+            crop_content=not args.no_crop,
+            palette=args.palette,
+            in_place=args.in_place,
+            recursive=args.recursive,
+        )
+    except Exception as e:  # noqa: BLE001 - reported as a CLI failure
+        console.print(f"[bold red]Pad failed:[/] {e}")
+        return 1
+
+    if args.json:
+        print(json.dumps(report.model_dump(), indent=2))
+        return 0
+
+    console.print(
+        f"[bold green]Padded {len(report.outputs)} image(s)[/] "
+        f"-> {report.canvas[0]}x{report.canvas[1]} ({report.align})"
+    )
+    for o in report.outputs:
+        console.print(f" • {o}")
+    for w in report.warnings:
+        console.print(f"[yellow]warning:[/] {w}")
+    return 0
+
+
 def cmd_sheet(args: argparse.Namespace) -> int:
     from .sheet import build_sheets
 
@@ -522,6 +560,25 @@ def main() -> None:
     p_gen.add_argument("--out", help="Output directory (default: ./spritewarden_generated/<slug>)")
     p_gen.add_argument("--json", action="store_true", help="Output JSON")
     p_gen.set_defaults(func=cmd_generate)
+
+    # pad (normalize provider output onto a uniform canvas)
+    p_pad = subparsers.add_parser("pad", help="Place sprite(s) on a uniform aligned canvas (fixed size or grow)")
+    p_pad.add_argument("paths", nargs="+", help="Files, folders, or glob patterns")
+    p_pad.add_argument("--size", type=int, help="Square canvas size in px (e.g. 64)")
+    p_pad.add_argument("--canvas", help="WxH canvas (e.g. 96x64); overrides --size")
+    p_pad.add_argument("--grow", type=int, help="Add N px of padding on every side of each frame's content")
+    p_pad.add_argument("--align", default="bottom-center", help="top/center/bottom + left/center/right (default bottom-center)")
+    p_pad.add_argument("--margin", type=int, default=0, help="Padding between content and canvas edge (px)")
+    p_pad.add_argument("--power-of-two", action="store_true", help="Round the canvas up to a power of two")
+    p_pad.add_argument("--fit", choices=["clip", "shrink"], default="clip",
+                       help="Oversized content: clip at canvas edge or integer-downscale (NEAREST) to fit")
+    p_pad.add_argument("--no-crop", action="store_true", help="Keep the existing canvas offsets instead of alpha-cropping first")
+    p_pad.add_argument("--palette", help="Also snap to a palette (builtin, lospec slug, or file)")
+    p_pad.add_argument("--out", help="Output PNG (single input) or directory (batch)")
+    p_pad.add_argument("--in-place", action="store_true", help="Overwrite the input files")
+    p_pad.add_argument("--recursive", action="store_true", help="Recurse into input folders")
+    p_pad.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_pad.set_defaults(func=cmd_pad)
 
     # sheet builder
     p_sheet = subparsers.add_parser("sheet", help="Combine images/folders into a palette-snapped, evenly-framed spritesheet")

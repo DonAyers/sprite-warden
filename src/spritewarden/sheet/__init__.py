@@ -17,12 +17,14 @@ from .builder import (
     discover_inputs,
     engine_report,
 )
+from .pad import PadReport, pad_files, pad_image, resolve_canvas
 
 __all__ = [
     "SNAPPER_ENV",
     "SnapResult",
     "SheetFrame",
     "SheetReport",
+    "PadReport",
     "detect_pixel_size",
     "find_pixel_snapper",
     "palette_hexes",
@@ -32,4 +34,7 @@ __all__ = [
     "build_sheets",
     "discover_inputs",
     "engine_report",
+    "pad_files",
+    "pad_image",
+    "resolve_canvas",
 ]

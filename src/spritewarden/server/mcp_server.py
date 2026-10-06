@@ -14,7 +14,7 @@ from ..repo.identity import CharacterIdentity
 from ..repo.palette import registry as palettes
 from ..reducer import ReduceParams, pixelize, refine
 from ..router import PipelineRouter
-from ..sheet import build_sheets, engine_report
+from ..sheet import build_sheets, engine_report, pad_files
 from ..learning.db import LearningDB
 from ..learning.doctor import report as learn_report
 from ..learning.episodes import record_episode as _record_episode
@@ -153,6 +153,41 @@ def build_sprite_sheet(
         recursive=recursive,
     )
     return {"sheets": [r.model_dump() for r in reports], "engine": engine_report()}
+
+
+@mcp.tool()
+def pad_sprite(
+    paths: Annotated[list[str], Field(description="Image files, folders, or glob patterns")],
+    size: Annotated[int | None, Field(description="Square canvas size in px (e.g. 64)")] = None,
+    canvas: Annotated[str | None, Field(description="WxH canvas (e.g. '96x64'); overrides size")] = None,
+    grow: Annotated[int | None, Field(description="Add N px of padding on every side of each frame's content")] = None,
+    align: Annotated[str, Field(description="top/center/bottom + left/center/right (default bottom-center)")] = "bottom-center",
+    margin: Annotated[int, Field(description="Padding between content and canvas edge (px)")] = 0,
+    power_of_two: Annotated[bool, Field(description="Round the canvas up to a power of two")] = False,
+    fit: Annotated[str, Field(description="Oversized content: 'clip' at canvas edge or 'shrink' (integer NEAREST downscale)")] = "clip",
+    crop_content: Annotated[bool, Field(description="Alpha-crop to content bounds before placing")] = True,
+    palette: Annotated[str | None, Field(description="Optional palette to snap to in the same pass")] = None,
+    output: Annotated[str | None, Field(description="Output PNG (single input) or directory (batch)")] = None,
+    in_place: Annotated[bool, Field(description="Overwrite the input files")] = False,
+    recursive: Annotated[bool, Field(description="Recurse into folders")] = False,
+) -> dict:
+    """Normalize provider output onto a uniform, aligned canvas (providers return varying sizes hugging the edges)."""
+    report = pad_files(
+        paths,
+        out=output,
+        size=size,
+        canvas=canvas,
+        grow=grow,
+        align=align,
+        margin=margin,
+        power_of_two=power_of_two,
+        fit=fit,
+        crop_content=crop_content,
+        palette=palette,
+        in_place=in_place,
+        recursive=recursive,
+    )
+    return report.model_dump()
 
 
 @mcp.tool()
