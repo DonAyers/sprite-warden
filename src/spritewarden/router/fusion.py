@@ -63,7 +63,7 @@ class FusionSynthesizer:
 A game project ({game_context}) requires a new asset pipeline.
 You must deliberate and return a valid JSON object matching this schema:
 {{
-  "provider": "pixellab" | "sprite_fusion" | "retro_diffusion" | "openrouter_image",
+  "provider": "pixellab" | "sprite_fusion" | "retro_diffusion" | "openrouter_image" | "spritecook",
   "operation": string,
   "prompt": string (sanitized, no noise words like 'pixel-perfect' or 'transparent background'),
   "size": integer (16, 32, 64, or 96),

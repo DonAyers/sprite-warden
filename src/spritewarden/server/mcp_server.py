@@ -14,6 +14,7 @@ from ..repo.identity import CharacterIdentity
 from ..repo.palette import registry as palettes
 from ..reducer import ReduceParams, pixelize, refine
 from ..router import PipelineRouter
+from ..sheet import build_sheets, engine_report
 from ..learning.db import LearningDB
 from ..learning.doctor import report as learn_report
 from ..learning.episodes import record_episode as _record_episode
@@ -117,6 +118,41 @@ def route_generation(
         force_fusion=force_fusion,
     )
     return result.model_dump()
+
+
+@mcp.tool()
+def build_sprite_sheet(
+    paths: Annotated[list[str], Field(description="Image files, folders, or glob patterns")],
+    output: Annotated[str, Field(description="Output PNG path, or a directory when group_by='prefix'")] = "spritesheet.png",
+    palette: Annotated[str | None, Field(description="Palette name / lospec slug / file, or null to skip palette snapping")] = "luap-40",
+    cell: Annotated[int | None, Field(description="Fixed cell size in px (default: auto = max content)")] = None,
+    columns: Annotated[int | None, Field(description="Grid columns (default: near-square)")] = None,
+    snap: Annotated[bool, Field(description="Run grid snapping (Rust snapper if available, else Python fallback)")] = True,
+    engine: Annotated[str, Field(description="auto, rust, python, or none")] = "auto",
+    align: Annotated[str, Field(description="top/center/bottom + left/center/right")] = "bottom-center",
+    margin: Annotated[int, Field(description="Padding inside each cell (px)")] = 0,
+    power_of_two: Annotated[bool, Field(description="Round the cell size up to a power of two")] = False,
+    crop: Annotated[bool, Field(description="Alpha-crop each frame to its content bounds")] = True,
+    group_by: Annotated[str, Field(description="'none' or 'prefix' (one sheet per filename prefix)")] = "none",
+    recursive: Annotated[bool, Field(description="Recurse into folders")] = False,
+) -> dict:
+    """Combine loose frames or a folder into a cohesive, palette-snapped, evenly-framed spritesheet."""
+    reports = build_sheets(
+        paths,
+        output,
+        group_by=group_by,
+        palette=palette,
+        cell=cell,
+        columns=columns,
+        snap=snap,
+        engine=engine,
+        align=align,
+        margin=margin,
+        power_of_two=power_of_two,
+        crop=crop,
+        recursive=recursive,
+    )
+    return {"sheets": [r.model_dump() for r in reports], "engine": engine_report()}
 
 
 @mcp.tool()

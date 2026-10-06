@@ -129,6 +129,8 @@ class JevClient:
                 chosen = "pixellab" if "pixellab" in options else options[0]
             elif "turnaround" in req_type or "concept" in req_type:
                 chosen = "openrouter_image" if "openrouter_image" in options else options[0]
+            elif "icon" in req_type:
+                chosen = "spritecook" if "spritecook" in options else options[0]
             else:
                 chosen = options[0]
             return DecisionOutcome(
@@ -177,6 +179,7 @@ class JevClient:
             "pixellab": "Best for humanoid characters, 8-direction character v3 from true South reference, and 8-frame walk cycles",
             "retro_diffusion": "Best for on-palette generation and tile variations",
             "openrouter_image": "Best for multi-pose keyframe sheets (load, smear, hit, recover) and concept turnarounds",
+            "spritecook": "Palette-locked stills and flat icons only",
         }
         outcome = self.ask_decision(
             state=state,

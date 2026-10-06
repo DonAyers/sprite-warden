@@ -10,6 +10,7 @@ KNOWN_PROVIDERS = [
     "sprite_fusion",
     "retro_diffusion",
     "openrouter_image",
+    "spritecook",
     "meshy",
     "aseprite",
     "lospec",
@@ -47,6 +48,25 @@ SEED_SOURCES: list[Source] = [
         url="https://www.retrodiffusion.ai/llms.txt",
         cadence_s=86400,
         notes="Retro Diffusion docs index (rd_* endpoint guidance).",
+    ),
+    Source(
+        id="spritecook_docs",
+        provider="spritecook",
+        kind="llms_txt",
+        url="https://www.spritecook.ai/llms.txt",
+        cadence_s=86400,
+        notes="SpriteCook LLM-friendly docs index (REST generate/animate, asset_id contract).",
+    ),
+    Source(
+        id="spritecook_mcp_tools",
+        provider="spritecook",
+        kind="mcp_tools",
+        url="mcp://spritecook",
+        cadence_s=86400,
+        notes=(
+            "SpriteCook hosted MCP tool surface (tools/list drift). Configure "
+            "SPRITEWARDEN_MCP_PROBES with a spritecook probe command to enable."
+        ),
     ),
     Source(
         id="aseprite_releases",

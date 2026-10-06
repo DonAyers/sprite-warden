@@ -19,13 +19,18 @@
    - Maintains consistent Character Identities with assigned palettes, ground offsets, prompts, and negative constraints (`[no toes]`, `[no human limbs]`).
    - SQLite FTS5 search index to deduplicate assets before generating.
 4. **Smart Generator Routing & Deliberation**:
-   - Fast-path routing with Jev to proven provider workflows (PixelLab, Sprite Fusion, Retro Diffusion, OpenRouter Nano Banana 2).
+   - Fast-path routing with Jev to proven provider workflows (PixelLab, Sprite Fusion, Retro Diffusion, OpenRouter Nano Banana 2, SpriteCook).
    - Multi-model deliberation with **OpenRouter Fusion** (`openrouter/fusion`) for novel/untested asset types.
-5. **Aseprite Integration**:
+   - Executable provider drivers (`spritewarden generate`) for PixelLab, Sprite Fusion, OpenRouter Image, and SpriteCook.
+5. **Sprite Sheet Builder**:
+   - `spritewarden sheet <files|folder> --out sheet.png`: discovers and orders frames (natural sort), snaps them to their implicit pixel grid, palette-locks them, and composes an evenly-celled, ground-aligned spritesheet + JSON manifest.
+   - Grid snapping uses the Rust `spritefusion-pixel-snapper` when present, with a pure-Python fallback (grid detection + majority-vote resample + Oklab palette snap) so it never hard-fails.
+6. **Aseprite Integration**:
    - `spritewarden open <path>`: Launch Aseprite immediately for inspection.
    - `spritewarden edit <sheet.png> --cell 64 --palette luap-40`: Interactive editing with auto-export on save and live QA checking.
-6. **Agent MCP Server**:
-   - Exposes tools (`search_art`, `get_character_identity`, `route_generation`, `judge_still`, `judge_animation`, `open_in_aseprite`) directly to AI coding agents.
+7. **Agent MCP Server**:
+   - Tools: `search_art`, `get_character_identity`, `register_character_identity`, `route_generation`, `judge_still`, `judge_animation`, `pixelize_image`, `build_sprite_sheet`, `open_in_aseprite`, `learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`.
+   - Resources: `spritewarden://playbook`, `spritewarden://proposals`, `spritewarden://providers`, `spritewarden://learn-status`.
 
 ## Quick CLI Usage
 
@@ -44,6 +49,12 @@ spritewarden edit assets/sprites/smolbot_topdown.png --cell 64
 
 # Route a generation request
 spritewarden route "dual tread robot chassis" --vehicle
+
+# Route and execute through the provider driver (e.g. SpriteCook)
+spritewarden generate "health potion icon" --type icon --provider spritecook --out assets/icons
+
+# Combine loose frames/folder into a palette-snapped, evenly-framed spritesheet
+spritewarden sheet assets/sprites/raw --out assets/sprites/walk.png --palette luap-40 --columns 8
 
 # Start the MCP server for AI agents
 spritewarden mcp

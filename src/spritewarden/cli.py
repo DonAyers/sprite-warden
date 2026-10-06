@@ -16,6 +16,7 @@ from .repo.identity import CharacterIdentity
 from .repo.palette import registry as palettes
 from .reducer import ReduceParams, pixelize, refine
 from .router import PipelineRouter
+from .generator import available_providers, dispatch
 from .learning import cli as learning_cli
 
 console = Console()
@@ -325,6 +326,103 @@ def cmd_route(args: argparse.Namespace) -> int:
     return 0
 
 
+def _slug(text: str) -> str:
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:48] or "asset"
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    cat = AssetCatalog()
+    router = PipelineRouter(catalog=cat)
+    char_ident = cat.get_identity(args.char_id) if args.char_id else None
+
+    result = router.route_request(
+        prompt=args.prompt,
+        asset_type=args.type,
+        character_identity=char_ident,
+        game=args.game,
+        perspective=args.perspective,
+        size=args.size,
+        is_animation=args.animation,
+        is_vehicle_or_rigid=args.vehicle,
+        force_fusion=args.fusion,
+    )
+
+    if result.action == "reuse_existing" and result.existing_asset_match:
+        m = result.existing_asset_match
+        if args.json:
+            print(result.model_dump_json(indent=2))
+        else:
+            console.print(f"[green]Reusing existing asset:[/] {m['name']} -> {m['file_path']}")
+        return 0
+
+    recipe = result.recipe
+    if recipe is None:
+        console.print("[bold red]No generation recipe produced.[/]")
+        return 1
+    if args.provider:
+        recipe.provider = args.provider
+
+    out_dir = Path(args.out) if args.out else Path.cwd() / "spritewarden_generated" / _slug(args.prompt)
+    output = dispatch(recipe, out_dir)
+
+    if args.json:
+        print(json.dumps({"recipe": recipe.model_dump(), "output": output.model_dump()}, indent=2))
+        return 0 if output.success else 1
+
+    status = "[bold green]OK[/]" if output.success else "[bold red]FAILED[/]"
+    console.print(f"[bold cyan]Generate ({recipe.provider} / {recipe.operation}):[/] {status}")
+    console.print(f"Prompt: {escape(recipe.prompt)}")
+    if output.error:
+        console.print(f"[red]Error:[/] {output.error}")
+    for f in output.output_files:
+        console.print(f" • {f}")
+    if output.metadata:
+        console.print(f"[dim]Metadata: {escape(json.dumps(output.metadata, default=str))}[/]")
+    return 0 if output.success else 1
+
+
+def cmd_sheet(args: argparse.Namespace) -> int:
+    from .sheet import build_sheets
+
+    try:
+        reports = build_sheets(
+            args.paths,
+            args.out,
+            group_by=args.group_by,
+            palette=None if args.no_palette else args.palette,
+            cell=args.cell,
+            columns=args.columns,
+            snap=not args.no_snap,
+            engine=args.engine,
+            align=args.align,
+            margin=args.margin,
+            power_of_two=args.power_of_two,
+            crop=not args.no_crop,
+            pixel_size=args.pixel_size,
+            recursive=args.recursive,
+        )
+    except Exception as e:  # noqa: BLE001 - reported as a CLI failure
+        console.print(f"[bold red]Sheet build failed:[/] {e}")
+        return 1
+
+    if args.json:
+        print(json.dumps([r.model_dump() for r in reports], indent=2))
+        return 0
+
+    for r in reports:
+        console.print(
+            f"[bold green]Sheet:[/] {r.sheet_path} "
+            f"({r.columns}x{r.rows}, cell {r.cell_size}px, {r.frame_count} frames, engine={r.engine})"
+        )
+        console.print(f"Manifest: {r.manifest_path}")
+        for w in r.warnings:
+            console.print(f"[yellow]warning:[/] {w}")
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     try:
         proc = open_file(args.path)
@@ -408,6 +506,44 @@ def main() -> None:
     p_route.add_argument("--fusion", action="store_true", help="Force OpenRouter Fusion multi-model deliberation")
     p_route.add_argument("--json", action="store_true", help="Output JSON")
     p_route.set_defaults(func=cmd_route)
+
+    # generate (route + execute via provider driver)
+    p_gen = subparsers.add_parser("generate", help="Route a request then execute it through the provider driver")
+    p_gen.add_argument("prompt", help="Asset generation description")
+    p_gen.add_argument("--type", default="character", help="character, vehicle, tileset, props, icon")
+    p_gen.add_argument("--char-id", help="Target CharacterIdentity slug")
+    p_gen.add_argument("--game", default="global", help="Target game slug")
+    p_gen.add_argument("--perspective", default="low top-down", help="Camera perspective")
+    p_gen.add_argument("--size", type=int, default=64, help="Pixel size (16, 32, 64, 96)")
+    p_gen.add_argument("--animation", action="store_true", help="Is an animation cycle")
+    p_gen.add_argument("--vehicle", action="store_true", help="Is a vehicle / rigid object")
+    p_gen.add_argument("--fusion", action="store_true", help="Force OpenRouter Fusion multi-model deliberation")
+    p_gen.add_argument("--provider", help=f"Override the routed provider (drivers: {', '.join(available_providers())})")
+    p_gen.add_argument("--out", help="Output directory (default: ./spritewarden_generated/<slug>)")
+    p_gen.add_argument("--json", action="store_true", help="Output JSON")
+    p_gen.set_defaults(func=cmd_generate)
+
+    # sheet builder
+    p_sheet = subparsers.add_parser("sheet", help="Combine images/folders into a palette-snapped, evenly-framed spritesheet")
+    p_sheet.add_argument("paths", nargs="+", help="Files, folders, or glob patterns")
+    p_sheet.add_argument("--out", default="spritesheet.png", help="Output PNG (or directory when --group-by prefix)")
+    p_sheet.add_argument("--palette", default="luap-40", help="Palette: builtin, lospec slug, or file")
+    p_sheet.add_argument("--no-palette", action="store_true", help="Do not palette-snap (grid only)")
+    p_sheet.add_argument("--cell", type=int, help="Fixed cell size in px (default: auto = max content)")
+    p_sheet.add_argument("--columns", type=int, help="Grid columns (default: near-square)")
+    p_sheet.add_argument("--align", default="bottom-center", help="top/center/bottom + left/center/right")
+    p_sheet.add_argument("--margin", type=int, default=0, help="Padding inside each cell (px)")
+    p_sheet.add_argument("--power-of-two", action="store_true", help="Round the cell size up to a power of two")
+    p_sheet.add_argument("--no-crop", action="store_true", help="Keep full canvas instead of alpha-cropping each frame")
+    p_sheet.add_argument("--recursive", action="store_true", help="Recurse into input folders")
+    p_sheet.add_argument("--no-snap", action="store_true", help="Skip grid snapping; only palette-snap")
+    p_sheet.add_argument("--engine", choices=["auto", "rust", "python", "none"], default="auto",
+                         help="Grid-snap engine: rust (spritefusion-pixel-snapper) or python fallback")
+    p_sheet.add_argument("--pixel-size", type=int, help="Override detected pixel block size")
+    p_sheet.add_argument("--group-by", choices=["none", "prefix"], default="none",
+                         help="Split into one sheet per filename prefix")
+    p_sheet.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_sheet.set_defaults(func=cmd_sheet)
 
     # open in aseprite
     p_open = subparsers.add_parser("open", help="Open an image or sprite in Aseprite for inspection")

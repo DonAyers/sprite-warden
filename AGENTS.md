@@ -10,12 +10,14 @@
 - Run all tests: `.venv\Scripts\python.exe -m pytest`
 - Run one test: `.venv\Scripts\python.exe -m pytest tests/test_judge.py::test_pixel_grid_flat_vs_mixel`
 - `uv run pytest` fails on this Windows machine with `uv trampoline failed to canonicalize script path` — invoke the venv python directly instead.
-- CLI smoke tests: `warden judge-still <png> --palette luap-40 [--vision]`, `warden judge-anim <sheet.png> --cell 64 [--walk]`, `warden route "<desc>" --type vehicle`, `warden pixelize <img> --palette <lospec-slug> [--refine --vision]`, `warden learn seed && warden learn check && warden learn doctor`, `warden learn reflect`, `warden mcp`.
+- CLI smoke tests: `warden judge-still <png> --palette luap-40 [--vision]`, `warden judge-anim <sheet.png> --cell 64 [--walk]`, `warden route "<desc>" --type vehicle`, `warden generate "<desc>" --type icon --provider spritecook --out <dir>`, `warden sheet <files|dir> --out <sheet.png> --palette luap-40 [--engine auto|rust|python]`, `warden pixelize <img> --palette <lospec-slug> [--refine --vision]`, `warden learn seed && warden learn check && warden learn doctor`, `warden learn reflect`, `warden mcp`.
 
 ## Environment / API keys
 - All LLM paths fall back to deterministic local heuristics when unauthenticated, so tests and the QA gates need no keys.
 - `OPENROUTER_API_KEY` — Jev routing, Fusion deliberation, vision judging, OpenRouter image gen. On Windows, `_get_openrouter_key()` (router/jev.py) also reads it from the registry `HKCU\Environment` when the env var is empty.
 - `SPRITE_FUSION_API_KEY`, `PIXELLAB_API_KEY` — provider drivers. `ASEPRITE` — path override for Aseprite.exe (else Windows install dirs are auto-discovered).
+- `SPRITE_COOK_API_KEY` — SpriteCook driver (alias `SPRITECOOK_API_KEY`; base URL override `SPRITE_COOK_API_URL`/`SPRITECOOK_API_URL`). Read from env, with a Windows `HKCU\Environment` registry fallback like the OpenRouter key.
+- `SPRITEWARDEN_PIXEL_SNAPPER` — path override for the Rust `spritefusion-pixel-snapper` binary used by `warden sheet` (else PATH, then `~/.cargo/bin`).
 
 ## Architecture
 - `src/spritewarden/judge/` — deterministic QA gates (pixel_grid, palette_adherence, clipping, symmetry, animation_anomalies, walk_mechanics, loop_smoothness) plus `VisionJudge`/`OrchestratedVerdict` (vision + Jev). Entry fns: `evaluate_still`, `evaluate_animation`.
@@ -23,7 +25,8 @@
 - `src/spritewarden/reducer/` — image reducer (`pixelize`: downscale → k-means pre-quantize → dither → vectorized Oklab snap) + `refine` AI tuning loop (contact-sheet vision scoring, critique→param mapping, convergence). Palettes: builtin names, lospec slugs (`na16` / `lospec:<slug>`, cached in `~/.spritewarden/palettes`), JSON/.tres/.hex files.
 - `src/spritewarden/learning/` — self-learning KB (`warden learn`): `db.py` (append-only `learning.db`), `models.py`, `taxonomy.py` (canonical perspective/style normalization), `registry.py` (seeded provider doc/tool sources), `acquisition.py` (conditional-GET fetch + snapshot; MCP `tools/list` probe), `mcp_probe.py` (minimal MCP stdio client), `diffing.py` (deterministic diff + significance), `episodes.py` (record attempts), `curation.py` (cluster → strategy + proposal; doc-event → proposal), `summarize.py` (optional capped LLM, deterministic fallback), `proposals.py` (review/apply gate), `scheduler.py` (background watcher), `doctor.py`, `tipshare_bridge.py`, `project_watch.py`, `cli.py`. Owns sources, snapshots, doc_events, provider_tools, episodes, strategies, proposals, tip_exports, budget. `PipelineRouter` appends `[learned]` rules from **active** strategies for the matching scope.
 - `src/spritewarden/router/` — `PipelineRouter.route_request`: catalog dedup → Jev (`typesafe/jev-1.13`) or OpenRouter Fusion. `playbook.py` holds provider recipes + prompt sanitization; a `GenerationRecipe` carries provider-specific args via `recipe.params`.
-- `src/spritewarden/generator/` — `BaseGeneratorDriver` + PixelLab / Sprite Fusion / OpenRouter drivers.
+- `src/spritewarden/generator/` — `BaseGeneratorDriver` + PixelLab / Sprite Fusion / OpenRouter / **SpriteCook** drivers, plus `registry.py` (`DRIVER_CLASSES`, `get_driver`, `dispatch`) so recipes are executable via `warden generate`. SpriteCook uses sync `/v1/api/generate-sync` + `/v1/api/animate-sync` (async job fallback), enforces the recipe palette via the API `colors` hex list, then re-snaps Oklab locally; asset IDs are canonical for reference/edit/animation.
+- `src/spritewarden/sheet/` — `warden sheet`: `snap.py` (Rust `spritefusion-pixel-snapper` wrapper + pure-Python grid-detect/majority-resample + Oklab palette snap fallback; `find_pixel_snapper`, `snap_image`) and `builder.py` (`discover_inputs`, `build_sheet`/`build_sheets`: alpha-crop → uniform cell → align → grid compose + JSON manifest). MCP tool: `build_sprite_sheet`.
 - `src/spritewarden/server/` — MCP server (`warden mcp`); starts the learning scheduler daemon and exposes learning resources (`spritewarden://playbook|proposals|providers|learn-status`) + tools (`learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`). `src/spritewarden/tools/` — Aseprite integration (Windows-only).
 - `scripts/ingest_game_assets.py` — one-off seeder for the `i-require-maintenance` game.
 
@@ -39,3 +42,7 @@
 - Learning DB lives at `<repo>/data/learning.db`; override with `SPRITEWARDEN_LEARNING_DB`. Background-check cadence/caps: `SPRITEWARDEN_LEARN_INTERVAL`, `SPRITEWARDEN_LEARN_MONTHLY_USD`. The first check of a source only establishes a **baseline snapshot** (no event); `doc_events` fire only on real transitions.
 - MCP `tools/list` drift probing needs a probe command per provider, e.g. `SPRITEWARDEN_MCP_PROBES='{"pixellab":["python","-m","pixellab_mcp"]}'`; without it `mcp_tools` sources are skipped silently.
 - Lospec has no stable machine-readable index (its palette-list HTML is per-request dynamic), so it is **not** a watched source; palettes are fetched directly via `load_palette`/`pixelize --palette`.
+- `warden sheet` resolves the Rust snapper via `SPRITEWARDEN_PIXEL_SNAPPER` → PATH → `~/.cargo/bin` (install: `cargo install spritefusion-pixel-snapper`). Rust palette recolor is straight RGB, so the builder re-snaps with Oklab afterwards; when the binary is missing/errors it silently uses the Python grid-detect + majority-resample fallback.
+
+## Outstanding / TODO
+- `warden sheet`: add optional `--register --game <slug>` to register composed frames into the `AssetCatalog` (currently pure file output with a JSON manifest; no catalog asset IDs are minted).

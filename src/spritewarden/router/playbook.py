@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class GenerationRecipe(BaseModel):
     """Execution recipe for a specific pixel art asset generation task."""
-    provider: str  # "pixellab" | "sprite_fusion" | "retro_diffusion" | "openrouter_image"
+    provider: str  # "pixellab" | "sprite_fusion" | "retro_diffusion" | "openrouter_image" | "spritecook"
     operation: str  # e.g. "direction-set", "create_character_v3", "animate", "inpaint_pro_flash"
     prompt: str
     size: int
@@ -45,6 +45,12 @@ def sanitize_prompt_for_provider(prompt: str, provider: str) -> str:
         # PixelLab docs: descriptions should be short (3-10 words) and avoid technical jargon
         for pattern in FORBIDDEN_NOISE_WORDS:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    elif p_lower == "spritecook":
+        # SpriteCook takes bg_mode/colors as separate API params, so strip them from prose.
+        for pattern in FORBIDDEN_NOISE_WORDS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b\d+x\d+\b", "", cleaned, flags=re.IGNORECASE)
 
     # Clean double spaces and commas
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -125,6 +131,24 @@ def determine_fallback_recipe(
                 "tileset_adherence should be ~250 for 32px tiles.",
             ],
             suggested_gates=["pixel_grid", "palette_adherence"],
+        )
+
+    if asset_type in ("icon", "ui_icon"):
+        # Icons / isolated UI glyphs: SpriteCook enforces the palette at generation time.
+        return GenerationRecipe(
+            provider="spritecook",
+            operation="generate",
+            prompt=sanitize_prompt_for_provider(subject, "spritecook"),
+            size=size or 64,
+            canvas_size=size or 64,
+            perspective=perspective,
+            params={"bg_mode": "transparent", "smart_crop_mode": "tightest", "mode": "assets"},
+            rules=[
+                "Request a single centered glyph with transparent background.",
+                "Palette is enforced via the colors hex list; re-snap with Oklab afterwards.",
+                "Stills return a canonical asset_id + sprite_url; keep the id for later edits.",
+            ],
+            suggested_gates=["pixel_grid", "palette_adherence", "clipping"],
         )
 
     if asset_type == "props":
