@@ -107,3 +107,49 @@ def test_vision_judge_orchestration():
     verdict = judge.orchestrate_judgment(card, img, prompt_description="steel cube")
     assert verdict.recommended_action in ("accept", "palette_remap", "inpaint_part", "reroll")
     assert 0.0 <= verdict.production_ready_prob <= 1.0
+
+
+def _noisy_sprite(size: int = 32, pad: int = 4) -> Image.Image:
+    import random
+
+    rnd = random.Random(7)
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    colors = [(50, 60, 70, 255), (200, 100, 30, 255), (90, 180, 120, 255)]
+    for y in range(pad, size - pad):
+        for x in range(pad, size - pad):
+            img.putpixel((x, y), rnd.choice(colors))
+    return img
+
+
+def test_pixel_grid_infers_block_size_for_sprites():
+    from spritewarden.judge.pixel import infer_scale
+
+    native = _noisy_sprite()
+    assert infer_scale(native) == (1, "native")
+    for k in (2, 3, 4):
+        up = native.resize((32 * k, 32 * k), Image.NEAREST)
+        assert infer_scale(up) == (k, "detected")
+        res, _ = check_pixel_grid(up)
+        assert res.passed is True and res.metrics["scale"] == k
+        assert any("not native" in w for w in res.warnings)
+    # a mixel inside an upscaled image fails at the detected scale
+    dirty = native.resize((64, 64), Image.NEAREST)
+    dirty.putpixel((20, 20), (255, 255, 255, 255))
+    res, _ = check_pixel_grid(dirty)
+    assert res.metrics["scale"] == 2 and res.passed is False
+
+
+def test_pixel_grid_keeps_screenshot_heuristic():
+    from spritewarden.judge.pixel import infer_scale
+
+    shot = Image.new("RGBA", (1280, 720), (10, 20, 30, 255))
+    assert infer_scale(shot) == (2, "screenshot")
+    assert infer_scale(Image.new("RGBA", (640, 360), (1, 2, 3, 255))) == (1, "screenshot")
+
+
+def test_pixel_grid_shifted_origin_cannot_hide_a_mixel():
+    clean = Image.new("RGBA", (8, 8), (255, 0, 0, 255))
+    dirty = clean.copy()
+    dirty.putpixel((0, 1), (0, 255, 0, 255))  # on the border: an offset origin used to skip it
+    res, _ = check_pixel_grid(dirty, scale=2)
+    assert res.passed is False and res.metrics["origin"] == [0, 0]
