@@ -663,6 +663,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
         recipe, out_dir,
         force_ungated=getattr(args, "force_ungated", False),
         project_root=getattr(args, "project", None),
+        register=not getattr(args, "no_register", False),
+        catalog=cat,
+        game=args.game,
+        character_id=args.char_id,
     )
 
     if args.json:
@@ -743,10 +747,24 @@ def cmd_sheet(args: argparse.Namespace) -> int:
         console.print(f"[bold red]Sheet build failed:[/] {e}")
         return 1
 
+    registered: dict[str, str] = {}
+    if getattr(args, "register", False):
+        from .repo.provenance import register_sheet
+
+        cat = AssetCatalog()
+        for r in reports:
+            registered[r.sheet_path] = register_sheet(cat, r, game=args.game, character_id=getattr(args, "char_id", None))
+
     if args.json:
-        print(json.dumps([r.model_dump() for r in reports], indent=2))
+        out = [r.model_dump() for r in reports]
+        for item in out:
+            if item["sheet_path"] in registered:
+                item["catalog_asset_id"] = registered[item["sheet_path"]]
+        print(json.dumps(out, indent=2))
         return 0
 
+    for path, asset_id in registered.items():
+        console.print(f"[dim]registered in the catalog: {asset_id} -> {path}[/]")
     for r in reports:
         console.print(
             f"[bold green]Sheet:[/] {r.sheet_path} "
@@ -1009,6 +1027,8 @@ def main(argv: list[str] | None = None) -> None:
     p_gen.add_argument("--force-ungated", action="store_true",
                        help="Run even though the recipe's input image has no passed gate record (recorded in the output)")
     p_gen.add_argument("--project", help="Project root for the asset manifest / pipeline.json lookups (default: found from the cwd)")
+    p_gen.add_argument("--no-register", action="store_true",
+                       help="Do not register the outputs (provider, asset ids, params) in the asset catalog")
     p_gen.add_argument("--out", help="Output directory (default: ./spritewarden_generated/<slug>)")
     p_gen.add_argument("--json", action="store_true", help="Output JSON")
     p_gen.set_defaults(func=cmd_generate)
@@ -1051,6 +1071,10 @@ def main(argv: list[str] | None = None) -> None:
     p_sheet.add_argument("--pixel-size", type=int, help="Override detected pixel block size")
     p_sheet.add_argument("--group-by", choices=["none", "prefix"], default="none",
                          help="Split into one sheet per filename prefix")
+    p_sheet.add_argument("--register", action="store_true",
+                         help="Register each composed sheet in the asset catalog (frames, cell, palette, sources)")
+    p_sheet.add_argument("--game", default="global", help="Game slug for --register")
+    p_sheet.add_argument("--char-id", help="CharacterIdentity slug for --register")
     p_sheet.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_sheet.set_defaults(func=cmd_sheet)
 

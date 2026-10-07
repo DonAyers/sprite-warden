@@ -8,6 +8,7 @@ including the SpriteCook integration.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .base import BaseGeneratorDriver, GenerationOutput
 from .openrouter_image import OpenRouterImageDriver
@@ -53,6 +54,10 @@ def dispatch(
     *,
     force_ungated: bool = False,
     project_root: str | Path | None = None,
+    register: bool = True,
+    catalog: Any = None,
+    game: str = "global",
+    character_id: str | None = None,
     **kwargs: object,
 ) -> GenerationOutput:
     """Execute a recipe through its provider driver, returning a structured failure if unknown.
@@ -62,6 +67,10 @@ def dispatch(
     (or an umbrella gate) and belongs to the provider its ``pipeline.json`` names.
     ``force_ungated=True`` (``warden generate --force-ungated``) runs it anyway and records
     the skipped reasons in the output metadata.
+
+    Outputs of a successful run are registered in the asset catalog (``catalog``, default the
+    shared one) with provider, operation, provider asset ids and params; their catalog ids
+    come back in ``metadata["catalog_asset_ids"]``. ``register=False`` skips that.
     """
     driver = get_driver(recipe.provider, **kwargs)
     if driver is None:
@@ -92,4 +101,18 @@ def dispatch(
     output = driver.generate(recipe, output_dir)
     if reasons:
         output.metadata["forced_ungated"] = reasons
+    if register and output.success and output.output_files:
+        # Provenance: every output file gets a catalog row (provider, operation, asset ids, params).
+        try:
+            from ..repo.provenance import register_generation
+
+            if catalog is None:
+                from ..repo.catalog import AssetCatalog
+
+                catalog = AssetCatalog()
+            output.metadata["catalog_asset_ids"] = register_generation(
+                catalog, recipe, output, game=game, character_id=character_id
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a paid generation
+            output.metadata["catalog_error"] = f"{type(exc).__name__}: {exc}"
     return output
