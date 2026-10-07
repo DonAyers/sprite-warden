@@ -2,8 +2,9 @@
 
 The registry (``spritewarden/data/recipes.json``) holds one entry per
 (provider, operation): start-image requirements, prompt rules, forbidden words,
-argument limits, the gates that must have passed before the call and the gates
-that must run after it. ``playbook.sanitize_prompt_for_provider`` and
+argument limits, the gates that must have passed before the call, the gates
+that must run after it, and a machine-readable ``enforce`` block that
+``spritewarden.enforce`` executes (the hook / ``warden check-call``). ``playbook.sanitize_prompt_for_provider`` and
 ``determine_fallback_recipe`` read it, as do the CLI (``warden recipes``) and
 the MCP resource ``spritewarden://recipes``.
 """
@@ -50,6 +51,10 @@ class Recipe(BaseModel):
     strip_dimensions: bool = False
     strip_counts: bool = False
     arg_limits: dict[str, Any] = Field(default_factory=dict)
+    enforce: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Machine-checkable rules for spritewarden.enforce: stage, source resolution, rules[]",
+    )
     required_gates_before: list[str] = Field(default_factory=list)
     required_gates_after: list[str] = Field(default_factory=list)
     asset_id_params: list[str] = Field(default_factory=list)
@@ -89,6 +94,7 @@ class ProviderRecipes(BaseModel):
     provider: str
     aliases: list[str] = Field(default_factory=list)
     defaults: dict[str, Any] = Field(default_factory=dict)
+    enforce: dict[str, Any] = Field(default_factory=dict, description="Provider-wide tool mapping and rules")
     operations: dict[str, Recipe] = Field(default_factory=dict)
 
     def find(self, operation: str) -> Recipe | None:
@@ -180,7 +186,8 @@ def _build(raw: dict[str, Any]) -> RecipeRegistry:
             merged.setdefault("strip_counts", bool(defaults.get("strip_counts", False)))
             ops[oname] = Recipe(**merged)
         providers[pname] = ProviderRecipes(
-            provider=pname, aliases=list(pdata.get("aliases", [])), defaults=defaults, operations=ops
+            provider=pname, aliases=list(pdata.get("aliases", [])), defaults=defaults,
+            enforce=dict(pdata.get("enforce") or {}), operations=ops
         )
     return RecipeRegistry(
         version=int(raw.get("version", 1)),

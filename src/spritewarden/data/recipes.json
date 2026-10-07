@@ -8,6 +8,7 @@
   "providers": {
     "pixellab": {
       "aliases": ["pixel_lab", "pl"],
+      "enforce": {"mcp_prefixes": ["mcp__pixellab__"], "read_only": ["^get_", "^list_", "^wait_for_jobs$", "^search_", "^agent_(help|list|inspect|feedback)$", "^chat_(get|list)_", "^view_map$", "^sandbox_", "^delete_", "^cancel_job$", "^(add_to|remove_from)_project$", "^pixelart_workbench$", "^dismiss_review$", "^update_\\w+_tags$", "^select_object_frames$"], "rules": [{"kind": "forbid_inline_image_args", "args": ["reference_image_base64", "custom_start_frame_base64", "end_frame_base64"], "message": "inline base64 references are truncated by MCP clients above ~32px: pass the URL field instead (PixelLab MCP guide)."}, {"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}], "source": [{"kind": "url", "args": ["reference_image_url", "custom_start_frame_url", "end_frame_url"]}]},
       "defaults": {
         "forbidden_words": [
           "\\btransparent\\s+background\\b", "\\bpixel[\\s-]?perfect\\b", "\\bcrisp\\s+pixel\\s+art\\b",
@@ -23,7 +24,7 @@
       },
       "operations": {
         "create_character_v3": {
-          "aliases": ["rotation", "create_character", "rotate"],
+          "aliases": ["rotation", "create_character", "create_character_pro_flash", "rotate"],
           "description": "8-direction turnaround of a figure-like (humanoid) sprite from one south reference.",
           "start_image": {
             "required": true,
@@ -53,6 +54,7 @@
             "body_class": "humanoid (mannequin template only); non-humanoids get limbs added",
             "output_size": "follows the reference image"
           },
+          "enforce": {"stage": "rotation"},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["direction_set", "palette_adherence", "clipping", "symmetry"],
           "asset_id_params": ["character_id", "style_character_id", "reference_image_url"],
@@ -87,6 +89,7 @@
           ],
           "forbidden_words": [],
           "arg_limits": {"frames_even": true, "frames_idle": 4, "frames_walk": 8, "frames_complex": 16, "directions_per_call": 1},
+          "enforce": {"stage": "animation", "source": [{"kind": "pixellab_character", "args": ["character_id"]}]},
           "required_gates_before": ["start_image", "direction_set"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
           "asset_id_params": ["character_id", "animation_id"],
@@ -112,6 +115,7 @@
           ],
           "forbidden_words": [],
           "arg_limits": {"frames_even": true, "directions_per_call": 1},
+          "enforce": {"stage": "animation", "source": [{"kind": "pixellab_character", "args": ["character_id"]}]},
           "required_gates_before": ["start_image", "direction_set"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
           "asset_id_params": ["character_id", "animation_id"],
@@ -119,7 +123,7 @@
           "sources": ["https://pixellab.ai/docs"]
         },
         "animate_text": {
-          "aliases": ["animate_text_v3", "text_v3", "animate_object", "animate_image"],
+          "aliases": ["animate_text_v3", "text_v3", "animate_object", "animate_image", "animate_image_pixminimax"],
           "description": "Text-driven v3 animation of a still (frame 0 stays identical to the input).",
           "start_image": {
             "required": true,
@@ -134,6 +138,7 @@
           "prompt_rules": ["Motion only; one direction per call; even frames; v3 bills on the grown canvas (96px often animates at ~132px)."],
           "forbidden_words": [],
           "arg_limits": {"frames_even": true, "directions_per_call": 1},
+          "enforce": {"stage": "animation", "source": [{"kind": "pixellab_character", "args": ["character_id"]}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
           "asset_id_params": ["character_id", "object_id"],
@@ -184,10 +189,25 @@
           "prompt_rules": ["Works well for props; identity transfer is unreliable for characters.", "Not a 3D rotation: a rigid box may drift; inspect all 8."],
           "forbidden_words": [],
           "arg_limits": {"reference_max_px": 168, "directions": 8, "body_class": "props/objects only"},
+          "enforce": {"stage": "rotation"},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
           "asset_id_params": ["object_id", "reference_image_url"],
           "notes": [],
+          "sources": ["https://api.pixellab.ai/mcp/docs"]
+        },
+        "create_character_state": {
+          "aliases": ["character_state", "state"],
+          "description": "A new pose/state (e.g. mid-stride) of a managed 8-direction character: the start frame for its walks.",
+          "start_image": null,
+          "prompt_rules": ["Describe the pose only; walks start from a MID-STRIDE state, idles from the still."],
+          "forbidden_words": [],
+          "arg_limits": {"directions_per_call": 1},
+          "enforce": {"stage": "animation", "source": [{"kind": "pixellab_character", "args": ["character_id"]}]},
+          "required_gates_before": ["direction_set"],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["character_id"],
+          "notes": ["The character's 8 views must be a gated set before any state or motion derives from them."],
           "sources": ["https://api.pixellab.ai/mcp/docs"]
         },
         "reduce_colors": {
@@ -207,6 +227,7 @@
     },
     "spritefusion": {
       "aliases": ["sprite_fusion", "sf"],
+      "enforce": {"cli": {"spending_ops": ["generate", "edit", "animate", "direction-set", "style-reference"]}, "rules": [{"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}, {"kind": "no_dimensions_in_prompt", "args": ["prompt"], "message": "no pixel dimensions in a Sprite Fusion prompt; size goes in the size field."}]},
       "defaults": {
         "forbidden_words": [
           "\\btransparent\\s+background\\b", "\\bcrisp\\s+pixel\\s+art\\b", "\\bpixel[\\s-]?perfect\\b",
@@ -254,6 +275,7 @@
           ],
           "forbidden_words": [],
           "arg_limits": {"size": "not accepted (API rejects size; output keeps the input size)", "supporting_images_max": 9},
+          "enforce": {"rules": [{"kind": "forbid_args", "args": ["size"], "message": "Sprite Fusion `{operation}` keeps the input's size and the API rejects --size."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
           "asset_id_params": ["images"],
@@ -296,6 +318,7 @@
           "prompt_rules": ["Takes no text prompt: visual cues in the image only.", "Output order is NOT positional: read each image's `direction` metadata."],
           "forbidden_words": [],
           "arg_limits": {"size_values": [16, 32, 64], "input_max_px": 64, "prompt": "none"},
+          "enforce": {"stage": "rotation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "enum", "arg": "size", "values": [16, 32, 64], "message": "`direction-set` size must be 16, 32 or 64 (anything bigger is shrunk); got {value}."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
           "asset_id_params": ["image"],
@@ -317,6 +340,7 @@
           "prompt_rules": ["Prompt = motion, energy, loop ('seamless loop').", "output_frames and colors go in fields, never the prompt; never request a spritesheet."],
           "forbidden_words": [],
           "arg_limits": {"output_frames_even": true, "output_frames_min": 2, "output_frames_max": 16, "output_frames_default": 8, "size": "not accepted"},
+          "enforce": {"stage": "animation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "forbid_args", "args": ["size"], "message": "Sprite Fusion `{operation}` keeps the input's size and the API rejects --size."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
           "asset_id_params": ["image"],
@@ -327,6 +351,7 @@
     },
     "retrodiffusion": {
       "aliases": ["retro_diffusion", "rd"],
+      "enforce": {"cli": {"spending_ops": ["generate"], "operation_from": [{"arg": "style"}, {"arg": "style", "prefix": "rd_pro__", "operation": "rd_pro"}, {"arg": "style", "prefix": "rd_advanced_animation__", "strip_prefix": true}]}, "rules": [{"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}]},
       "defaults": {
         "forbidden_words": ["\\btransparent\\s+background\\b", "\\bpixel\\s+art\\b", "\\bpixel[\\s-]?perfect\\b"],
         "prompt_rules": [
@@ -356,6 +381,7 @@
           "prompt_rules": ["Optional short subject hint only; identity comes from input_image.", "return_spritesheet = 3x3 PNG, centre empty, every view facing the centre; frame order starts down-right and turns counter-clockwise, cardinals at 2/4/6/8."],
           "forbidden_words": [],
           "arg_limits": {"input_min_px": 32, "input_max_px": 256, "multiple_of": 8, "width_height": "must equal the input exactly", "views": 8, "base64": "raw, no data: prefix"},
+          "enforce": {"stage": "rotation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "multiple_of", "arg": "size", "of": 8, "message": "advanced-animation sizes must be multiples of {of} and equal the input (got {value})."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
           "asset_id_params": ["input_image"],
@@ -373,6 +399,7 @@
           "prompt_rules": ["Describe MOTION, not the character; weight/speed adverbs help most."],
           "forbidden_words": [],
           "arg_limits": {"frames_duration_loop": 8, "input_multiple_of": 8, "width_height": "equal to the input", "base64": "raw, no data: prefix"},
+          "enforce": {"stage": "animation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "multiple_of", "arg": "size", "of": 8, "message": "advanced-animation sizes must be multiples of {of} and equal the input (got {value})."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
           "asset_id_params": ["input_image"],
@@ -389,6 +416,7 @@
           "prompt_rules": ["Describe MOTION, not the character."],
           "forbidden_words": [],
           "arg_limits": {"frames_duration_loop": 8, "input_multiple_of": 8, "width_height": "equal to the input"},
+          "enforce": {"stage": "animation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "multiple_of", "arg": "size", "of": 8, "message": "advanced-animation sizes must be multiples of {of} and equal the input (got {value})."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
           "asset_id_params": ["input_image"],
@@ -405,6 +433,7 @@
           "prompt_rules": ["Describe MOTION, not the character."],
           "forbidden_words": [],
           "arg_limits": {"frames_duration_snappy": 6, "frames_duration_flowing": "10-12", "input_multiple_of": 8},
+          "enforce": {"stage": "animation", "source": [{"kind": "path", "args": ["input"]}], "rules": [{"kind": "multiple_of", "arg": "size", "of": 8, "message": "advanced-animation sizes must be multiples of {of} and equal the input (got {value})."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["animation_anomalies", "palette_adherence"],
           "asset_id_params": ["input_image"],
@@ -445,6 +474,7 @@
     },
     "spritecook": {
       "aliases": ["sprite_cook", "sc"],
+      "enforce": {"mcp_prefixes": ["mcp__plugin_spritecook_spritecook__", "mcp__spritecook__"], "spends": ["^generate_", "^animate_", "^remove_background$", "^create_ui_kit$", "^generate_ui_kit", "^extract_ui_kit"], "operation_overrides": [{"tool": "generate_game_art", "arg_present": "edit_asset_id", "operation": "edit"}], "rules": [{"kind": "max_items", "arg": "colors", "max": 8, "message": "`colors` has {count} entries; SpriteCook's API takes at most {max} and treats them as guidance -- drop it and remap afterwards."}, {"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}]},
       "defaults": {
         "forbidden_words": [
           "\\btransparent\\s+background\\b", "\\bpixel[\\s-]?perfect\\b", "\\bcrisp\\s+pixel\\s+art\\b",
@@ -496,6 +526,7 @@
           "prompt_rules": ["Keep 'Enhance prompt' ON and prompts short.", "Engine v1.1 for anything that must LOOP (walks, idles; even frames); v1.5 for a one-angle action (steadier, stiffer, no negative prompt).", "Margins LOW: 0-5% idle, 5-10% attack, 10-15% jump."],
           "forbidden_words": [],
           "arg_limits": {"source_max_px": 256, "source_recommended_px": 64, "frames_default": 8, "frames_even_for_loops": true, "presets_topdown": ["idle", "idle_back", "idle_right", "walk_up", "walk_down", "walk_right", "attack", "hurt", "death"], "walk_left": "mirror in-engine"},
+          "enforce": {"stage": "animation", "source": [{"kind": "manifest_asset", "args": ["character_id", "asset_id"]}], "rules": [{"kind": "matte_collision", "matte_arg": null, "default": "#808080", "max_fraction": 0.02, "distance": 24, "advice": "generate_character_animations has no matte parameter: use animate_game_art with an explicit matte_color absent from the sprite (e.g. \"#FF00FF\") instead."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
           "asset_id_params": ["asset_id", "source_view"],
@@ -513,6 +544,7 @@
           "prompt_rules": ["Short prose prompt from what's visible; enhancer ON.", "Frame count is the first knob when motion feels stiff."],
           "forbidden_words": [],
           "arg_limits": {"source_max_px": 256, "output_frames_even": true, "output_frames_min": 2, "output_frames_max": 16, "output_format": "spritesheet", "edge_margin": 6},
+          "enforce": {"stage": "animation", "source": [{"kind": "manifest_asset", "args": ["asset_id"]}], "rules": [{"kind": "loop_engine", "model_arg": "model", "model": "pixel-engine-v1.5", "args": ["prompt"], "words": ["loop", "walk", "roll", "idle", "run", "breath"], "message": "pixel-engine-v1.5 is for one-angle actions; loops (walk/roll/idle) belong on v1.1 (SpriteCook's engine guide)."}, {"kind": "require_arg_value", "arg": "auto_enhance_prompt", "not": [false], "message": "SpriteCook says keep the prompt enhancer ON and the prompt short; a preset (generate_character_animations) is the documented path for idle/walk/attack/hurt."}, {"kind": "matte_collision", "matte_arg": "matte_color", "default": "#808080", "removebg_arg": "removebg", "max_fraction": 0.02, "distance": 24, "advice": "pass a matte colour absent from the sprite (e.g. matte_color \"#FF00FF\")."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
           "asset_id_params": ["asset_id"],
