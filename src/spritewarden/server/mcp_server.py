@@ -360,8 +360,9 @@ def judge_animation(
     is_walk: Annotated[bool, Field(description="Run the walk-mechanics gate (cadence for legs; steady turning base for wheels/treads)")] = False,
     palette: Annotated[str | None, Field(description="Target palette to check")] = "luap-40",
     locomotion: Annotated[str, Field(description="legs | wheels | treads: wheels/treads skip cadence and check ground-row steadiness and hub/wheel bbox stability")] = "legs",
+    source_path: Annotated[str | None, Field(description="The still the animation was made from: the frame_integrity gate fails frames with enclosed transparent holes the still lacks (a keyed-out fill) or >15% less opaque area. Without it frames are only compared with each other, so a hole present in EVERY frame goes unseen.")] = None,
 ) -> dict:
-    """Run temporal anomaly, loop smoothness, and walk mechanics checks on an animation sequence."""
+    """Run frame integrity (holes / lost area vs the source still), temporal anomaly, loop smoothness, and walk mechanics checks on an animation sequence."""
     from ..gates import gates_from_scorecard, write_record
 
     card = evaluate_animation(
@@ -370,6 +371,7 @@ def judge_animation(
         is_walk=is_walk,
         palette_source=palette,
         locomotion=locomotion,
+        source=source_path,
     )
     out = card.model_dump()
     src = Path(sheet_or_dir_path)
@@ -379,6 +381,7 @@ def judge_animation(
         try:
             written.append(str(write_record(t, gates_from_scorecard(card, "anim"), params={
                 "command": "judge_animation", "cell": cell_size, "is_walk": is_walk, "locomotion": locomotion, "palette": palette,
+                "source": source_path,
             })))
         except Exception as exc:  # noqa: BLE001
             out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")

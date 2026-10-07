@@ -392,6 +392,7 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         is_walk=args.walk,
         palette_source=args.palette,
         locomotion=args.locomotion,
+        source=getattr(args, "source", None),
     )
 
     from .gates import gates_from_scorecard
@@ -400,7 +401,7 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
     targets = sorted(f for f in src.iterdir() if f.suffix.lower() == ".png") if src.is_dir() else [src]
     records = _write_records(
         targets, gates_from_scorecard(card, "anim"),
-        _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette")),
+        _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette", "source")),
         not getattr(args, "no_record", False),
     )
 
@@ -825,6 +826,9 @@ def main(argv: list[str] | None = None) -> None:
     p_anim.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), default="legs",
                         help="How the character moves: legs (alternating feet), wheels or treads (ground row + hub steadiness)")
     p_anim.add_argument("--palette", default="luap-40", help="Target palette name or file")
+    p_anim.add_argument("--source", metavar="STILL.png",
+                        help="The still the animation was made from: frame_integrity fails frames with enclosed holes "
+                             "the still lacks (a keyed-out fill) or >15%% less opaque area")
     p_anim.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_anim.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_anim.set_defaults(func=cmd_judge_anim)

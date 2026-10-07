@@ -8,6 +8,7 @@ from .pixel import check_pixel_grid
 from .palette import check_palette, remap_image, load_palette
 from .bounds import check_clipping, check_symmetry
 from .animation import check_animation_anomalies
+from .integrity import check_frame_integrity, enclosed_holes
 from .walk import check_walk_cycle
 from .loop import check_loop_smoothness, check_gif_timing, drop_loop_stalls
 from .start_image import check_start_image, SIZE_TIERS
@@ -32,6 +33,8 @@ __all__ = [
     "check_clipping",
     "check_symmetry",
     "check_animation_anomalies",
+    "check_frame_integrity",
+    "enclosed_holes",
     "check_walk_cycle",
     "check_loop_smoothness",
     "check_gif_timing",
@@ -155,13 +158,23 @@ def evaluate_animation(
     palette_source: str | Path | list[str] | None = None,
     ratio: float = 1.8,
     locomotion: str = "legs",
+    source: str | Path | Image.Image | None = None,
 ) -> AnimationScorecard:
     """Run all verification gates on an animation sequence.
 
     ``locomotion`` (legs | wheels | treads) selects the walk gate's mode when ``is_walk``:
     legs check alternating feet; wheels/treads check a steady ground row and a stable,
     turning base instead of cadence.
+
+    ``source`` is the still the animation was made from: the ``frame_integrity`` gate
+    compares every frame with it (enclosed holes the still lacks, lost opaque area).
+    Without it the frames are only compared with each other.
     """
+    source_img: Image.Image | None = None
+    if isinstance(source, (str, Path)):
+        source_img = Image.open(source).convert("RGBA")
+    elif source is not None:
+        source_img = source.convert("RGBA")
     if isinstance(frames_or_sheet, (str, Path)):
         p = Path(frames_or_sheet)
         if p.is_dir():
@@ -218,6 +231,15 @@ def evaluate_animation(
             metrics={"clipped_frames": sliced_frames},
         )
     )
+
+    # 2b. Integrity: no frame may lose parts the source still has (a keyed-out fill, a missing limb)
+    integrity_gate = check_frame_integrity(frames, source=source_img)
+    gates.append(integrity_gate)
+    if not integrity_gate.passed:
+        suggested_actions.append(
+            "Regenerate with a background matte colour absent from the sprite (or without background removal): "
+            "parts of the still are transparent in the frames"
+        )
 
     # 3. Temporal anomaly gate (specks, spikes, jitter)
     anom_gate = check_animation_anomalies(frames)
