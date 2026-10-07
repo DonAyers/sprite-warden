@@ -57,7 +57,9 @@ Use it to:
 5. Validate animations for temporal specks, spikes, and loop stutter (`judge_animation`).
 6. Reduce any artwork to a pixel palette render, AI-refined on request (`pixelize_image`).
 7. Open sprites and sheets in Aseprite for visual inspection (`open_in_aseprite`).
-8. Consult the self-learning knowledge base: live resources `spritewarden://playbook`,
+8. Read each provider's documented recipe before generating (`get_recipe`, resource `spritewarden://recipes`):
+   start-image rules, forbidden words, argument limits, and the gates required before/after.
+9. Consult the self-learning knowledge base: live resources `spritewarden://playbook`,
    `spritewarden://proposals`, `spritewarden://providers`, `spritewarden://learn-status`;
    tools `learn_status`, `list_learned_proposals`, `approve_learned_proposal`, `record_learning_episode`.
 """
@@ -332,6 +334,34 @@ def pixelize_image(
 # ---------------------------------------------------------------------------
 # Learning subsystem: live resources (always-current strategy state)
 # ---------------------------------------------------------------------------
+
+
+@mcp.resource("spritewarden://recipes", name="recipes", description="Per-provider recipe registry: start-image rules, prompt rules, forbidden words, arg limits, required gates", mime_type="application/json")
+def resource_recipes() -> str:
+    from ..router.recipes import registry_json
+
+    return registry_json()
+
+
+@mcp.tool()
+def get_recipe(
+    provider: Annotated[str, Field(description="pixellab, spritefusion, retrodiffusion, spritecook, openrouter_image (aliases accepted)")],
+    operation: Annotated[str | None, Field(description="Operation or alias (e.g. direction-set, rotate, create_character_v3); omit to list the provider's operations")] = None,
+) -> dict:
+    """Read the documented recipe for a provider operation: what its start image must look like, prompt rules, limits, and the gates required before and after."""
+    from ..router.recipes import registry
+
+    reg = registry()
+    if reg.canonical_provider(provider) is None:
+        return {"error": f"unknown provider '{provider}'", "known": list(reg.providers)}
+    if operation:
+        rec = reg.get(provider, operation)
+        if rec is None:
+            return {"error": f"unknown operation '{operation}'", "known": [r.operation for r in reg.select(provider)]}
+        out = rec.model_dump()
+        out["forbidden_words_effective"] = [p.pattern for p in reg.forbidden_patterns(provider, operation)]
+        return out
+    return {"provider": reg.canonical_provider(provider), "recipes": [r.model_dump() for r in reg.select(provider)]}
 
 
 @mcp.resource("spritewarden://playbook", name="playbook", description="Active learned strategies", mime_type="application/json")

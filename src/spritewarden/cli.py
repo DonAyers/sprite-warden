@@ -461,6 +461,81 @@ def cmd_sheet(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recipes(args: argparse.Namespace) -> int:
+    from .router.recipes import registry, registry_json
+
+    reg = registry()
+    if args.provider and reg.canonical_provider(args.provider) is None:
+        console.print(f"[bold red]Unknown provider:[/] {args.provider} (known: {', '.join(reg.providers)})")
+        return 1
+    if args.provider and args.operation and reg.get(args.provider, args.operation) is None:
+        ops = ", ".join(r.operation for r in reg.select(args.provider))
+        console.print(f"[bold red]Unknown operation:[/] {args.operation} (known for {args.provider}: {ops})")
+        return 1
+    if args.json:
+        print(registry_json(args.provider, args.operation))
+        return 0
+
+    if args.provider and args.operation:
+        r = reg.get(args.provider, args.operation)
+        assert r is not None
+        console.print(f"[bold cyan]{r.provider} / {r.operation}[/]  {escape(r.description)}")
+        if r.aliases:
+            console.print(f"[dim]aliases: {', '.join(r.aliases)}[/]")
+        if r.start_image and r.start_image.required:
+            si = r.start_image
+            console.print("[bold]Start image:[/]")
+            for k, v in si.model_dump(exclude_none=True).items():
+                if k == "notes":
+                    continue
+                console.print(f"  {k}: {escape(str(v))}")
+            for n in si.notes:
+                console.print(f"  [dim]- {escape(n)}[/]")
+        elif r.start_image is None:
+            console.print("[bold]Start image:[/] none (prompt / tool driven)")
+        if r.prompt_rules:
+            console.print("[bold]Prompt rules:[/]")
+            for rule in r.prompt_rules:
+                console.print(f"  - {escape(rule)}")
+        pats = [p.pattern for p in reg.forbidden_patterns(r.provider, r.operation)]
+        if pats:
+            console.print(f"[bold]Forbidden words:[/] {escape(', '.join(pats))}")
+        if r.arg_limits:
+            console.print("[bold]Arg limits:[/]")
+            for k, v in r.arg_limits.items():
+                console.print(f"  {k}: {escape(str(v))}")
+        console.print(f"[bold]Gates before:[/] {', '.join(r.required_gates_before) or '-'}")
+        console.print(f"[bold]Gates after:[/] {', '.join(r.required_gates_after) or '-'}")
+        if r.asset_id_params:
+            console.print(f"[bold]Asset-id params:[/] {', '.join(r.asset_id_params)}")
+        for n in r.notes:
+            console.print(f"[dim]note: {escape(n)}[/]")
+        for src in r.sources:
+            console.print(f"[dim]source: {src}[/]")
+        return 0
+
+    table = Table(title="Provider recipes" + (f" ({args.provider})" if args.provider else ""), show_header=True)
+    table.add_column("Provider", style="cyan")
+    table.add_column("Operation")
+    table.add_column("Start image")
+    table.add_column("Gates before")
+    table.add_column("Gates after")
+    for r in reg.select(args.provider):
+        si = r.start_image
+        si_text = "-" if si is None else (
+            ", ".join(b for b in [
+                si.facing if si.facing and si.facing != "any" else "",
+                si.canvas if si.canvas and si.canvas != "any" else "",
+                f"<={si.max_px}px" if si.max_px else "",
+                f"x{si.multiple_of}" if si.multiple_of else "",
+            ] if b) or "any"
+        ) + ("" if si is None or si.required else " (optional)")
+        table.add_row(r.provider, r.operation, si_text, ", ".join(r.required_gates_before) or "-", ", ".join(r.required_gates_after) or "-")
+    console.print(table)
+    console.print("[dim]warden recipes <provider> <operation> for the full entry; --json for machine output[/]")
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     try:
         proc = open_file(args.path)
@@ -601,6 +676,13 @@ def main() -> None:
                          help="Split into one sheet per filename prefix")
     p_sheet.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_sheet.set_defaults(func=cmd_sheet)
+
+    # recipes (per-provider rules as data)
+    p_rec = subparsers.add_parser("recipes", help="Print the per-provider recipe registry (start-image rules, limits, gates)")
+    p_rec.add_argument("provider", nargs="?", help="pixellab, spritefusion, retrodiffusion, spritecook, openrouter_image")
+    p_rec.add_argument("operation", nargs="?", help="Operation name or alias, e.g. direction-set, rotate, create_character_v3")
+    p_rec.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_rec.set_defaults(func=cmd_recipes)
 
     # open in aseprite
     p_open = subparsers.add_parser("open", help="Open an image or sprite in Aseprite for inspection")

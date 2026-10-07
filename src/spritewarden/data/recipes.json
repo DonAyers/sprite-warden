@@ -1,0 +1,589 @@
+{
+  "version": 1,
+  "source_document": "i-require-maintenance/docs/pipeline-audit.md section 2 (research pass 2026-10-06)",
+  "gate_names": [
+    "start_image", "direction_set", "pixel_grid", "palette_adherence", "clipping", "symmetry",
+    "loop_smoothness", "animation_anomalies", "walk_mechanics", "vision_reference"
+  ],
+  "providers": {
+    "pixellab": {
+      "aliases": ["pixel_lab", "pl"],
+      "defaults": {
+        "forbidden_words": [
+          "\\btransparent\\s+background\\b", "\\bpixel[\\s-]?perfect\\b", "\\bcrisp\\s+pixel\\s+art\\b",
+          "\\bhigh\\s+quality\\b", "\\b8[\\s-]?bit\\b", "\\b16[\\s-]?bit\\b"
+        ],
+        "prompt_rules": [
+          "Descriptions short (3-10 words), no technical instructions; negative prompts are deprecated.",
+          "Images to the API by URL, never inline base64 above ~32px (MCP clients truncate it).",
+          "Never rescale pixel art: crop an oversized source; unzoom upscaled art before using it as a reference.",
+          "Off-palette output is expected: reduce_colors on the whole set in ONE call, then our remap."
+        ],
+        "sources": ["https://pixellab.ai/docs", "https://api.pixellab.ai/mcp/docs"]
+      },
+      "operations": {
+        "create_character_v3": {
+          "aliases": ["rotation", "create_character", "rotate"],
+          "description": "8-direction turnaround of a figure-like (humanoid) sprite from one south reference.",
+          "start_image": {
+            "required": true,
+            "facing": "south",
+            "pose": "full-body, neutral standing idle, arms at sides, low top-down, centred",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 256,
+            "native_pixels": true,
+            "symmetric": true,
+            "notes": [
+              "Whatever the sprite faces is taken as south: a 3/4 turn silently offsets the WHOLE set by 45 degrees.",
+              "Choose the smallest canvas that still fits; the reference's framing is inherited by all 8 views.",
+              "Reject action poses, portrait framing and isometric references."
+            ]
+          },
+          "prompt_rules": [
+            "PixelLab's own recipe: 'full-body front-facing south-facing idle game character sprite, low top-down view, centered, neutral standing pose with arms at sides'.",
+            "Rotate the BODY alone; add wheel/rack/held tools as layers or inpaints after the set exists.",
+            "Enable Force symmetry (S/N vertically symmetric, E/W mirrors); flip a good direction for its mirror."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {
+            "reference_max_px": 256,
+            "reference_prefer_url_above_px": 32,
+            "directions": 8,
+            "body_class": "humanoid (mannequin template only); non-humanoids get limbs added",
+            "output_size": "follows the reference image"
+          },
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["direction_set", "palette_adherence", "clipping", "symmetry"],
+          "asset_id_params": ["character_id", "style_character_id", "reference_image_url"],
+          "notes": [
+            "v3 reference mode supports the mannequin template only; angled or non-humanoid shapes risk poor results.",
+            "style_character_id (a completed 8-direction character) or color_image locks the palette."
+          ],
+          "sources": ["https://pixellab.ai/docs", "https://api.pixellab.ai/mcp/docs"]
+        },
+        "animate_skeleton": {
+          "aliases": ["animate_with_skeleton_v3", "skeleton", "animate_character_skeleton", "animate_character_v3"],
+          "description": "Skeleton-driven animation (moves pixels instead of redrawing): the recommended path for character work.",
+          "start_image": {
+            "required": true,
+            "facing": "south",
+            "pose": "walks: a MID-STRIDE state; idles: the gated still",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 256,
+            "native_pixels": true,
+            "notes": [
+              "A walk described from a standing frame has to invent the stride; one from a mid-stride frame continues it.",
+              "Skeleton keypoints must match the image or transparency and colour degrade."
+            ]
+          },
+          "prompt_rules": [
+            "Animate south first, one direction per call.",
+            "Describe motion only, never appearance or environment.",
+            "Fixed head 'always' for a stable face.",
+            "Even frame counts: 4 idle, 8 walk, 16 complex.",
+            "Fix frames by freezing good ones and inpainting the rest (raise init strength)."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"frames_even": true, "frames_idle": 4, "frames_walk": 8, "frames_complex": 16, "directions_per_call": 1},
+          "required_gates_before": ["start_image", "direction_set"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
+          "asset_id_params": ["character_id", "animation_id"],
+          "notes": ["2-4 generations per direction."],
+          "sources": ["https://pixellab.ai/docs", "https://api.pixellab.ai/mcp/docs"]
+        },
+        "animate_template": {
+          "aliases": ["animate_character", "template"],
+          "description": "Template animation (1 generation per direction) of a managed 8-direction character.",
+          "start_image": {
+            "required": true,
+            "facing": "south",
+            "pose": "walks from a mid-stride create_character_state; idles from the still",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 256,
+            "native_pixels": true,
+            "notes": ["Walk loops from idle stances are high-risk for closure failures."]
+          },
+          "prompt_rules": [
+            "Animate south first, one direction per call.",
+            "Motion only; fixed head; even frames (4 idle, 8 walk, 16 complex)."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"frames_even": true, "directions_per_call": 1},
+          "required_gates_before": ["start_image", "direction_set"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
+          "asset_id_params": ["character_id", "animation_id"],
+          "notes": [],
+          "sources": ["https://pixellab.ai/docs"]
+        },
+        "animate_text": {
+          "aliases": ["animate_text_v3", "text_v3", "animate_object", "animate_image"],
+          "description": "Text-driven v3 animation of a still (frame 0 stays identical to the input).",
+          "start_image": {
+            "required": true,
+            "facing": "any",
+            "pose": "walks mid-stride; idles the still",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 256,
+            "native_pixels": true,
+            "notes": ["Managed characters return 9 images for 8 frames (frame 0 = the input)."]
+          },
+          "prompt_rules": ["Motion only; one direction per call; even frames; v3 bills on the grown canvas (96px often animates at ~132px)."],
+          "forbidden_words": [],
+          "arg_limits": {"frames_even": true, "directions_per_call": 1},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["character_id", "object_id"],
+          "notes": [],
+          "sources": ["https://pixellab.ai/docs"]
+        },
+        "inpaint": {
+          "aliases": ["inpaint_image", "inpaint_image_pro_flash", "inpaint_pro_flash"],
+          "description": "Add or change one part on a locked body with a mask.",
+          "start_image": {
+            "required": true,
+            "facing": "any",
+            "pose": "the gated BARE body (inpaint onto the body, not onto a body with the part already drawn)",
+            "canvas": "square",
+            "margin_px": 3,
+            "min_px": 32,
+            "max_px": 256,
+            "multiple_of": 4,
+            "native_pixels": true,
+            "notes": ["Pro Flash sizes 32-256 in multiples of 4; no images or masks are rescaled."]
+          },
+          "prompt_rules": [
+            "Mask: pure black/white, same size as the source; WHITE = generate (v3 / Pro Flash; the Aseprite extension is reversed).",
+            "Inpainting never draws outside the mask: mask ALL the space the part may occupy; leave context around it.",
+            "Short description of the part (3-10 words)."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"min_px": 32, "max_px": 256, "multiple_of": 4, "crop_to_mask": true, "mask_white_means": "generate"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["image_url", "mask_url"],
+          "notes": ["Held items are layers in PixelLab's own model (paperdoll transfer_outfit, inpaint 'adding equipment')."],
+          "sources": ["https://pixellab.ai/docs", "https://api.pixellab.ai/mcp/docs"]
+        },
+        "create_8_direction_object": {
+          "aliases": ["object_rotation", "8_direction_object"],
+          "description": "8 directions of a prop or rigid object from one reference (props only).",
+          "start_image": {
+            "required": true,
+            "facing": "south",
+            "pose": "the object alone, centred",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 168,
+            "native_pixels": true,
+            "notes": ["Size cannot be set: the image dimensions determine the output size; pad the reference square first."]
+          },
+          "prompt_rules": ["Works well for props; identity transfer is unreliable for characters.", "Not a 3D rotation: a rigid box may drift; inspect all 8."],
+          "forbidden_words": [],
+          "arg_limits": {"reference_max_px": 168, "directions": 8, "body_class": "props/objects only"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
+          "asset_id_params": ["object_id", "reference_image_url"],
+          "notes": [],
+          "sources": ["https://api.pixellab.ai/mcp/docs"]
+        },
+        "reduce_colors": {
+          "aliases": ["palette_reduce"],
+          "description": "Quantize a whole set to a palette image in one call.",
+          "start_image": null,
+          "prompt_rules": ["ALL frames in one call ('quantizing them one at a time is the mistake this tool exists to prevent')."],
+          "forbidden_words": [],
+          "arg_limits": {"frames_per_call": "all"},
+          "required_gates_before": [],
+          "required_gates_after": ["palette_adherence"],
+          "asset_id_params": ["image_urls", "palette_image"],
+          "notes": ["Follow with our own Oklab remap for exact adherence."],
+          "sources": ["https://api.pixellab.ai/mcp/docs"]
+        }
+      }
+    },
+    "spritefusion": {
+      "aliases": ["sprite_fusion", "sf"],
+      "defaults": {
+        "forbidden_words": [
+          "\\btransparent\\s+background\\b", "\\bcrisp\\s+pixel\\s+art\\b", "\\bpixel[\\s-]?perfect\\b",
+          "\\bsprite\\s*sheet\\b", "\\bspritesheet\\b", "\\bgrid\\b", "\\bhigh\\s+quality\\b",
+          "\\b8[\\s-]?bit\\b", "\\b16[\\s-]?bit\\b"
+        ],
+        "strip_dimensions": true,
+        "strip_counts": true,
+        "prompt_rules": [
+          "Noise words to never write: 'transparent background', 'crisp pixel art', 'pixel-perfect', pixel dimensions, counts, 'spritesheet/grid'.",
+          "Never retry an interrupted stream (billed)."
+        ],
+        "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/api/api-reference"]
+      },
+      "operations": {
+        "generate": {
+          "aliases": ["create", "still"],
+          "description": "New still from a prompt (12 variations per 15 credits).",
+          "start_image": null,
+          "prompt_rules": ["Describe the subject; sizes and counts go in fields, not prose."],
+          "forbidden_words": [],
+          "arg_limits": {"size_min": 16, "size_max": 128, "size_note": "16-128 (style-reference rule; generate range inferred)"},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": [],
+          "notes": ["Recommended chain: generate -> clean in editor -> edit into the motion pose -> animate."],
+          "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/api/api-reference"]
+        },
+        "edit": {
+          "aliases": ["variant"],
+          "description": "One change to an existing sprite; keeps the input's size.",
+          "start_image": {
+            "required": true,
+            "facing": "any",
+            "pose": "the gated still",
+            "canvas": "any",
+            "margin_px": 1,
+            "native_pixels": true,
+            "notes": ["First input = primary, up to 9 supporting images."]
+          },
+          "prompt_rules": [
+            "Describe only the intended change. State what must stay unchanged.",
+            "One change per request; chain results.",
+            "Never ask for a sheet of poses."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"size": "not accepted (API rejects size; output keeps the input size)", "supporting_images_max": 9},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["images"],
+          "notes": [],
+          "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/api/api-reference"]
+        },
+        "style-reference": {
+          "aliases": ["style_reference", "style"],
+          "description": "New sprites in the style of 4-8 reference sprites (9 results).",
+          "start_image": null,
+          "prompt_rules": [
+            "4-8 sprites (larger sets may confuse).",
+            "Describe the subject, not the style; neutral prompt ('giant' overpowers).",
+            "Restate traits that must hold ('no outlines')."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"references_min": 4, "references_max": 8, "size_min": 16, "size_max": 128, "results": 9},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["images"],
+          "notes": [],
+          "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/api/api-reference"]
+        },
+        "direction-set": {
+          "aliases": ["direction_set", "directions", "8dir"],
+          "description": "8 directions of one finished sprite; NO prompt.",
+          "start_image": {
+            "required": true,
+            "facing": "east",
+            "pose": "a clean 1:1 sprite with an unmistakable front cue and a different back cue (headlights vs tail lights)",
+            "canvas": "square",
+            "margin_px": 3,
+            "max_px": 64,
+            "native_pixels": true,
+            "notes": [
+              "Measured: an unmarked side start gave fronts for backs; front/back cues gave all 8 right; a bulky 96px mech went humanoid at NE/NW.",
+              "The docs give no facing rule, so the image must carry it (their example faces east-ish)."
+            ]
+          },
+          "prompt_rules": ["Takes no text prompt: visual cues in the image only.", "Output order is NOT positional: read each image's `direction` metadata."],
+          "forbidden_words": [],
+          "arg_limits": {"size_values": [16, 32, 64], "input_max_px": 64, "prompt": "none"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
+          "asset_id_params": ["image"],
+          "notes": ["An 88px input came back 64; a 96px mech ~40px and cut."],
+          "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/generate-8-directions-for-your-pixel-art"]
+        },
+        "animate": {
+          "aliases": ["animation"],
+          "description": "Animate a still into a loop (PNG sheet + WebP + JSON).",
+          "start_image": {
+            "required": true,
+            "facing": "any",
+            "pose": "genuine pixel art with a clean grid and a pose suited to the motion (edit into a mid-motion pose before a roll/walk)",
+            "canvas": "any",
+            "margin_px": 2,
+            "native_pixels": true,
+            "notes": ["Animation must be cohesive with the starting image; clean the still first.", "If the animation is wrong: go back to the still, adjust the pose or silhouette, then generate again (never reword)."]
+          },
+          "prompt_rules": ["Prompt = motion, energy, loop ('seamless loop').", "output_frames and colors go in fields, never the prompt; never request a spritesheet."],
+          "forbidden_words": [],
+          "arg_limits": {"output_frames_even": true, "output_frames_min": 2, "output_frames_max": 16, "output_frames_default": 8, "size": "not accepted"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["image"],
+          "notes": [],
+          "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/animation-tips"]
+        }
+      }
+    },
+    "retrodiffusion": {
+      "aliases": ["retro_diffusion", "rd"],
+      "defaults": {
+        "forbidden_words": ["\\btransparent\\s+background\\b", "\\bpixel\\s+art\\b", "\\bpixel[\\s-]?perfect\\b"],
+        "prompt_rules": [
+          "Never write 'transparent background' or 'pixel art'; prompt a flat contrasting background and set remove_bg.",
+          "Training max is 256: never upscale an input.",
+          "503s are normal: retry once after minutes; failures refund."
+        ],
+        "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+      },
+      "operations": {
+        "rotate": {
+          "aliases": ["rd_advanced_animation__rotate", "8_directions"],
+          "description": "8 views of an existing sprite ($0.10); always 8, 3x3 sheet optional.",
+          "start_image": {
+            "required": true,
+            "facing": "south",
+            "pose": "neutral, tools clearly separated from the body",
+            "canvas": "square",
+            "margin_px": 3,
+            "min_px": 32,
+            "max_px": 256,
+            "multiple_of": 8,
+            "native_pixels": true,
+            "transparent": true,
+            "notes": ["A 4x display copy is rejected: send the native-resolution frame.", "Thin asymmetric props are the likeliest to be redrawn."]
+          },
+          "prompt_rules": ["Optional short subject hint only; identity comes from input_image.", "return_spritesheet = 3x3 PNG, centre empty, every view facing the centre; frame order starts down-right and turns counter-clockwise, cardinals at 2/4/6/8."],
+          "forbidden_words": [],
+          "arg_limits": {"input_min_px": 32, "input_max_px": 256, "multiple_of": 8, "width_height": "must equal the input exactly", "views": 8, "base64": "raw, no data: prefix"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["direction_set", "palette_adherence", "clipping"],
+          "asset_id_params": ["input_image"],
+          "notes": ["The prompt-driven rd_animation__8_dir_rotation ($0.25, 80x80) invents the design: never for an existing sprite."],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+        },
+        "walking": {
+          "aliases": ["rd_advanced_animation__walking", "walk"],
+          "description": "Walk loop from a cardinal view ($0.14).",
+          "start_image": {
+            "required": true, "facing": "any", "pose": "neutral pose", "canvas": "square", "margin_px": 3,
+            "min_px": 32, "max_px": 256, "multiple_of": 8, "native_pixels": true, "transparent": true,
+            "notes": ["Best results when uploading a neutral pose.", "A sprite whose opaque pixels touch the canvas edge animates badly."]
+          },
+          "prompt_rules": ["Describe MOTION, not the character; weight/speed adverbs help most."],
+          "forbidden_words": [],
+          "arg_limits": {"frames_duration_loop": 8, "input_multiple_of": 8, "width_height": "equal to the input", "base64": "raw, no data: prefix"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "walk_mechanics", "palette_adherence"],
+          "asset_id_params": ["input_image"],
+          "notes": [],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+        },
+        "idle": {
+          "aliases": ["rd_advanced_animation__idle"],
+          "description": "Idle loop ($0.14).",
+          "start_image": {
+            "required": true, "facing": "any", "pose": "neutral pose", "canvas": "square", "margin_px": 3,
+            "min_px": 32, "max_px": 256, "multiple_of": 8, "native_pixels": true, "transparent": true, "notes": []
+          },
+          "prompt_rules": ["Describe MOTION, not the character."],
+          "forbidden_words": [],
+          "arg_limits": {"frames_duration_loop": 8, "input_multiple_of": 8, "width_height": "equal to the input"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["input_image"],
+          "notes": [],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+        },
+        "attack": {
+          "aliases": ["rd_advanced_animation__attack", "custom_action", "rd_advanced_animation__custom_action"],
+          "description": "Single action ($0.14): 6 frames snappy, 10-12 flowing.",
+          "start_image": {
+            "required": true, "facing": "any", "pose": "neutral pose", "canvas": "square", "margin_px": 3,
+            "min_px": 32, "max_px": 256, "multiple_of": 8, "native_pixels": true, "transparent": true, "notes": []
+          },
+          "prompt_rules": ["Describe MOTION, not the character."],
+          "forbidden_words": [],
+          "arg_limits": {"frames_duration_snappy": 6, "frames_duration_flowing": "10-12", "input_multiple_of": 8},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["input_image"],
+          "notes": [],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+        },
+        "rd_pro": {
+          "aliases": ["rd_pro__default", "rd_pro__topdown", "pro"],
+          "description": "Still generation with up to 9 reference images ($0.18).",
+          "start_image": null,
+          "prompt_rules": [
+            "Reference images guide style and content without being redrawn: generate the character once, then pass that output back as a reference.",
+            "input_palette is quantization, not a promise: add return_pre_palette.",
+            "Prompt a flat contrasting background + remove_bg: true."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"reference_images_max": 9, "size_min": 12, "size_max": 256, "characters_retro": "16-48", "characters_showcase": "96-128", "items": "32-64", "input_image": "RGB without transparency"},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["reference_images", "input_image"],
+          "notes": ["A user__ style can be built from one reference via POST /v2/styles (force_palette, force_bg_removal)."],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+        },
+        "pixel_tools": {
+          "aliases": ["pixel_fixer", "k_centroid_downscale", "pixel_correction", "palette_converter", "color_reducer"],
+          "description": "Free pixel-perfecting tools for HD/AI images.",
+          "start_image": null,
+          "prompt_rules": ["Pipeline: k_centroid_downscale (width+height required) or Pixel Fixer -> pixel_correction -> palette_converter."],
+          "forbidden_words": [],
+          "arg_limits": {"k_centroid": "width and height required", "pixel_fixer_min_cell_px": 3, "pixel_fixer_dither": "fails on heavy dithering; /neural for damaged images"},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence"],
+          "asset_id_params": ["input_image"],
+          "notes": ["Colours come from the unquantized original."],
+          "sources": ["https://github.com/Retro-Diffusion/api-examples/blob/main/PIXEL_FIXER.md"]
+        }
+      }
+    },
+    "spritecook": {
+      "aliases": ["sprite_cook", "sc"],
+      "defaults": {
+        "forbidden_words": [
+          "\\btransparent\\s+background\\b", "\\bpixel[\\s-]?perfect\\b", "\\bcrisp\\s+pixel\\s+art\\b",
+          "\\bhigh\\s+quality\\b", "\\b8[\\s-]?bit\\b", "\\b16[\\s-]?bit\\b"
+        ],
+        "strip_dimensions": true,
+        "prompt_rules": [
+          "One-line prompts: silhouette + unique details; mention the view angle.",
+          "Name the distinctive parts in every edit prompt ('chrome arm'); be material-specific.",
+          "Keep one resolution tier (16-32 / 48-64 / 96 / 128) for the whole set; size is a hint, not a promise."
+        ],
+        "sources": ["https://spritecook.ai/docs"]
+      },
+      "operations": {
+        "generate_game_art": {
+          "aliases": ["generate", "still"],
+          "description": "Still generation (pixel or HD); the strongest still/edit tool we have.",
+          "start_image": null,
+          "prompt_rules": ["Mention the view angle; start around 128px output for character sprites.", "Once you have one sprite you like, add it as a style reference for everything else."],
+          "forbidden_words": [],
+          "arg_limits": {"colors_max": 8, "colors_note": "the API hex palette takes at most 8 colours; 4/8/16/unlimited are guidance", "style_asset_ids_max": 10, "size": "hint only (64 asked, 54 or 72 returned)", "size_tiers": [[16, 32], [48, 64], [96, 96], [128, 128]]},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["asset_id", "style_asset_ids", "reference_asset_id"],
+          "notes": ["Output is snapped by SpriteCook's grid detector but drifts in size: snap/remap ourselves afterwards."],
+          "sources": ["https://spritecook.ai/docs", "https://spritecook.ai/blog/why-ai-cant-match-pixel-art-resolution"]
+        },
+        "generate_character": {
+          "aliases": ["character"],
+          "description": "Base character (64x64, transparent, perspective baked in, tight crop).",
+          "start_image": null,
+          "prompt_rules": ["Match your perspective early: changing perspective after the fact is much harder; the animation won't rotate the view for you.", "Generate the base character once, then animate that exact asset_id."],
+          "forbidden_words": [],
+          "arg_limits": {"size_default": 64, "perspectives": ["topdown", "sidescroller", "isometric"], "colors_max": 8},
+          "required_gates_before": [],
+          "required_gates_after": ["start_image", "pixel_grid", "palette_adherence"],
+          "asset_id_params": ["asset_id"],
+          "notes": ["No rotation tool: directions come from the perspective's animation presets."],
+          "sources": ["https://spritecook.ai/blog/character-creator-flow"]
+        },
+        "generate_character_animations": {
+          "aliases": ["character_animations", "characters"],
+          "description": "Preset motion set on a base character asset id.",
+          "start_image": {
+            "required": true, "facing": "south", "pose": "the exact first frame the motion starts from (prep pose; a back-facing run wants the character turned around)",
+            "canvas": "square", "margin_px": 0, "max_px": 256, "native_pixels": true,
+            "notes": ["Prep poses are grid-checked against the character's real resolution; a retry 'tends to make the same call' -- fix with the Pro model, more detail, or a regenerated character."]
+          },
+          "prompt_rules": ["Keep 'Enhance prompt' ON and prompts short.", "Engine v1.1 for anything that must LOOP (walks, idles; even frames); v1.5 for a one-angle action (steadier, stiffer, no negative prompt).", "Margins LOW: 0-5% idle, 5-10% attack, 10-15% jump."],
+          "forbidden_words": [],
+          "arg_limits": {"source_max_px": 256, "source_recommended_px": 64, "frames_default": 8, "frames_even_for_loops": true, "presets_topdown": ["idle", "idle_back", "idle_right", "walk_up", "walk_down", "walk_right", "attack", "hurt", "death"], "walk_left": "mirror in-engine"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["asset_id", "source_view"],
+          "notes": ["Turning a character by edit is NOT documented anywhere."],
+          "sources": ["https://spritecook.ai/blog/custom-character-animations"]
+        },
+        "animate_game_art": {
+          "aliases": ["animate"],
+          "description": "One motion from an existing asset.",
+          "start_image": {
+            "required": true, "facing": "any", "pose": "tight crop of the still the motion starts from",
+            "canvas": "any", "margin_px": 0, "max_px": 256, "native_pixels": true,
+            "notes": ["Source <=256px, recommended 64x64; use edge_margin instead of padding the source."]
+          },
+          "prompt_rules": ["Short prose prompt from what's visible; enhancer ON.", "Frame count is the first knob when motion feels stiff."],
+          "forbidden_words": [],
+          "arg_limits": {"source_max_px": 256, "output_frames_even": true, "output_frames_min": 2, "output_frames_max": 16, "output_format": "spritesheet", "edge_margin": 6},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
+          "asset_id_params": ["asset_id"],
+          "notes": ["In Godot use the OUTPUT frame size (margins enlarge frames); verify frames x width = sheet width."],
+          "sources": ["https://spritecook.ai/blog/animate-custom-sprites"]
+        },
+        "edit": {
+          "aliases": ["edits", "revise"],
+          "description": "Revise a still (same asset id lineage).",
+          "start_image": {
+            "required": true, "facing": "any", "pose": "the gated still", "canvas": "any", "margin_px": 0,
+            "max_px": 256, "native_pixels": true, "notes": []
+          },
+          "prompt_rules": ["Repeat the identifying parts each time; one change per edit; keep the resolution tier."],
+          "forbidden_words": [],
+          "arg_limits": {"colors_max": 8, "size": "keep the base's tier"},
+          "required_gates_before": ["start_image"],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["asset_id", "edit_asset_id"],
+          "notes": [],
+          "sources": ["https://spritecook.ai/docs"]
+        }
+      }
+    },
+    "openrouter_image": {
+      "aliases": ["openrouter", "nano_banana", "image_model"],
+      "defaults": {
+        "forbidden_words": ["\\btransparent\\s+background\\b", "\\btransparent\\b", "\\bpixel[\\s-]?perfect\\b"],
+        "prompt_rules": [
+          "Alpha is faked: exact #00FF00 background + 2-3px white outline, keyed in HSV with despill; never 'transparent'.",
+          "Nobody reports any image model honouring a true pixel grid or exact size: all output needs snapping."
+        ],
+        "sources": ["https://openrouter.ai/models", "https://news.ycombinator.com/item?id=46058566"]
+      },
+      "operations": {
+        "generate": {
+          "aliases": ["render", "concept"],
+          "description": "Concept/anchor render from a general image model (NB2 / NB Pro / FLUX / Qwen).",
+          "start_image": {
+            "required": false, "facing": "south", "pose": "reference anchor on a graph-paper grid when deriving views",
+            "canvas": "square", "margin_px": 0, "native_pixels": false,
+            "notes": ["The south anchor on a grid overlay is 'the most important image you'll generate'."]
+          },
+          "prompt_rules": [
+            "ONE view per call: never a whole 8-direction/16-frame sheet in one text call.",
+            "Reference + full layout spec + a PRESERVE LIST repeated every call (face, proportions, outline weight, shading; camera, scale, cell size, foot baseline).",
+            "Per-view edits: 'change only the facing, keep everything else', chaining anchor + previous view.",
+            "'Orthographic projection / flat 2D' stops feet shrinking; attach a graph-paper grid image."
+          ],
+          "forbidden_words": [],
+          "arg_limits": {"canvas": 1024, "references_nb2": 14, "character_refs_nb2": 4, "alpha": "none (fake checkerboard risk)", "fake_pixel_px": "6-7, uneven"},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": ["reference_images"],
+          "notes": ["Props baked into the body are what drift: generate parts as layers.", "A seeded model (FLUX Kontext, Seedream) for reproducibility."],
+          "sources": ["https://openrouter.ai/models"]
+        },
+        "snap": {
+          "aliases": ["pixel_snap", "key_and_snap"],
+          "description": "Image-model output -> pixel art: key the background, detect the model's grid, one colour per cell, remap.",
+          "start_image": null,
+          "prompt_rules": ["Snap the WHOLE sheet at once so every frame shares one grid and palette.", "Confirm the detected step equals the graph-paper step; reject frames whose step differs; then our remap.", "No snapper fixes semantic errors."],
+          "forbidden_words": [],
+          "arg_limits": {"key_color": "#00FF00 or #FF00FF", "never": "shrink by a guessed factor"},
+          "required_gates_before": [],
+          "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
+          "asset_id_params": [],
+          "notes": ["Pixel Snapper: 'works best when the source is already close to pixel art'; auto-detect misreads 1:1 art as a 5px grid (always --keep-size for native art)."],
+          "sources": ["https://github.com/spritefusion/pixel-snapper"]
+        }
+      }
+    }
+  }
+}
