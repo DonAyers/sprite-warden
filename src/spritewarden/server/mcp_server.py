@@ -288,9 +288,12 @@ def judge_still(
         judge = VisionJudge(vision_model=vision_model)
     if reference_path:
         ref_img = Image.open(reference_path).convert("RGBA")
+        from ..judge.views import canonical_facing
+
         comparison = judge.compare_to_reference(
             img, ref_img,
-            facing=None if facing == "south" else facing,
+            facing=canonical_facing(facing) or facing,
+            anchor_facing="south",
             description=description,
             expected_perspective=perspective,
         )
@@ -334,6 +337,9 @@ def judge_direction_set(
     palette: Annotated[str | None, Field(description="Target palette to check, or null to skip")] = "luap-40",
     character_id: Annotated[str | None, Field(description="CharacterIdentity slug; sided marker features (e.g. 'left hand wrench' with marker_hex) enable the tool-side check")] = None,
     write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside each view (or the strip)")] = True,
+    vision: Annotated[bool, Field(description="Also compare EVERY view with the anchor by vision model (one PAID call per view): invented parts and parts missing though they should be visible FAIL; parts hidden by the turn do not. Writes gate vision_reference into each view's record. Offline = FAIL.")] = False,
+    vision_model: Annotated[str, Field(description="Vision model slug")] = DEFAULT_VISION_MODEL,
+    description: Annotated[str, Field(description="Subject description for the vision comparison")] = "",
 ) -> dict:
     """Cross-view gate for a direction set: same ground row (+-1), drawn height (+-2px), opaque area (+-20%), equal component count (extra parts are named), tool side per facing, palette."""
     from PIL import Image
@@ -347,16 +353,45 @@ def judge_direction_set(
     anchor = Image.open(anchor_path).convert("RGBA") if anchor_path else None
     gate = check_direction_set(frames, anchor=anchor, identity=identity, palette=palette)
     out = {"source": source_path, "views": list(frames), **gate.model_dump()}
+    vision_gates: dict = {}
+    vision_gate = None
+    if vision:
+        from ..judge.views import canonical_facing, compare_views_to_anchor, vision_summary_gate
+
+        vision_anchor = anchor
+        skip = False
+        if vision_anchor is None:
+            vision_anchor = next((img for name, img in frames.items() if (canonical_facing(name) or name) == "south"), None)
+            skip = True
+        if vision_anchor is None:
+            return {**out, "passed": False, "error": "vision needs an anchor: pass anchor_path or include a south view"}
+        vision_gates = compare_views_to_anchor(
+            frames, vision_anchor, VisionJudge(vision_model=vision_model), skip_anchor_view=skip,
+            description=description or (identity.prompt_description if identity is not None else ""),
+        )
+        vision_gate = vision_summary_gate(vision_gates)
+        out["vision_reference"] = {"summary": vision_gate.model_dump(),
+                                   "views": {f: g.model_dump() for f, g in vision_gates.items()}}
+        out["passed"] = bool(gate.passed) and vision_gate.passed
     if write_gate_record:
         src = Path(source_path)
-        targets = list(direction_frame_files(src).values()) if src.is_dir() else [src]
+        files = direction_frame_files(src) if src.is_dir() else {}
+        targets = list(files.values()) if src.is_dir() else [src]
+        by_path = {str(p): f for f, p in files.items()}
         gates = gates_from_scorecard(gate)
-        gates["views"] = {"passed": bool(gate.passed), "facings": list(frames)}
-        params = {"command": "judge_direction_set", "cell": cell_size, "anchor": anchor_path, "palette": palette, "character_id": character_id}
+        gates["views"] = {"passed": bool(out["passed"]), "facings": list(frames)}
+        if vision_gate is not None and not src.is_dir():
+            gates.update(gates_from_scorecard(vision_gate))
+        params = {"command": "judge_direction_set", "cell": cell_size, "anchor": anchor_path, "palette": palette,
+                  "character_id": character_id, "vision": vision}
         written = []
         for t in targets:
             try:
-                written.append(str(write_record(t, gates, params=params)))
+                own = gates
+                facing_gate = vision_gates.get(by_path.get(str(t), ""))
+                if facing_gate is not None:
+                    own = {**gates, **gates_from_scorecard(facing_gate)}
+                written.append(str(write_record(t, own, params=params)))
             except Exception as exc:  # noqa: BLE001
                 out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
         out["gate_records"] = written

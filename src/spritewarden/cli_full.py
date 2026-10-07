@@ -238,9 +238,13 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
         from .judge import reference_gate
 
         ref_img = Image.open(reference_path).convert("RGBA")
+        from .judge.views import canonical_facing
+
+        # Both facings go into the prompt: parts the turn hides are expected, invented parts fail.
         comparison = judge.compare_to_reference(
             img, ref_img,
-            facing=getattr(args, "facing", None) if getattr(args, "facing", "south") != "south" else None,
+            facing=canonical_facing(getattr(args, "facing", "south")) or getattr(args, "facing", "south"),
+            anchor_facing=canonical_facing(getattr(args, "anchor_facing", "south")) or getattr(args, "anchor_facing", "south"),
             description=getattr(args, "desc", "") or "",
             expected_perspective=getattr(args, "perspective", "low top-down"),
         )
@@ -340,27 +344,69 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
     )
 
     from .gates import gates_from_scorecard
-    from .judge.views import direction_frame_files
+    from .judge.views import canonical_facing, compare_views_to_anchor, direction_frame_files, vision_summary_gate
+
+    # Opt-in (one paid model call per view): compare every view with the anchor for invented /
+    # missing parts, with the facings in the prompt so occlusion by the turn is not a "difference".
+    vision_gates: dict = {}
+    vision_gate = None
+    if getattr(args, "vision", False):
+        anchor_facing = canonical_facing(args.anchor_facing) or args.anchor_facing
+        vision_anchor = anchor
+        skip_anchor_view = False
+        if vision_anchor is None and identity is not None and identity.turnaround_stills.get(anchor_facing):
+            still = Path(identity.turnaround_stills[anchor_facing])
+            if still.is_file():
+                vision_anchor = Image.open(still).convert("RGBA")
+        if vision_anchor is None:
+            vision_anchor = next((img for name, img in frames.items() if (canonical_facing(name) or name) == anchor_facing), None)
+            skip_anchor_view = True
+        if vision_anchor is None:
+            console.print(f"[bold red]--vision needs an anchor:[/] pass --anchor, or include a {anchor_facing} view")
+            return 1
+        vision_gates = compare_views_to_anchor(
+            frames, vision_anchor, VisionJudge(vision_model=args.vision_model),
+            anchor_facing=anchor_facing, skip_anchor_view=skip_anchor_view,
+            description=getattr(args, "desc", "") or (identity.prompt_description if identity is not None else ""),
+            expected_perspective=args.perspective,
+        )
+        vision_gate = vision_summary_gate(vision_gates)
+    overall = bool(gate.passed) and (vision_gate is None or vision_gate.passed)
 
     src = Path(args.source)
-    targets = list(direction_frame_files(src).values()) if src.is_dir() else [src]
+    files = direction_frame_files(src) if src.is_dir() else {}
+    targets = list(files.values()) if src.is_dir() else [src]
     gates = gates_from_scorecard(gate)
-    gates["views"] = {"passed": bool(gate.passed), "facings": list(frames)}
-    records = _write_records(
-        targets, gates,
-        _record_params(args, "judge-views", ("cell", "anchor", "palette", "no_palette", "char_id",
-                                              "ground_tolerance", "height_tolerance", "area_tolerance")),
-        not getattr(args, "no_record", False),
-    )
+    gates["views"] = {"passed": overall, "facings": list(frames)}
+    params = _record_params(args, "judge-views", ("cell", "anchor", "palette", "no_palette", "char_id",
+                                                   "ground_tolerance", "height_tolerance", "area_tolerance",
+                                                   "vision", "anchor_facing"))
+    enabled = not getattr(args, "no_record", False)
+    if vision_gate is None:
+        records = _write_records(targets, gates, params, enabled)
+    elif src.is_dir():
+        # each view's record carries ITS comparison with the anchor
+        records = []
+        for facing, path in files.items():
+            own = dict(gates)
+            if facing in vision_gates:
+                own.update(gates_from_scorecard(vision_gates[facing]))
+            records += _write_records([path], own, {**params, "facing": facing}, enabled)
+    else:
+        records = _write_records(targets, {**gates, **gates_from_scorecard(vision_gate)}, params, enabled)
 
     if args.json:
         out_dict = gate.model_dump()
+        out_dict["passed"] = overall
+        if vision_gate is not None:
+            out_dict["vision_reference"] = {"summary": vision_gate.model_dump(),
+                                            "views": {f: g.model_dump() for f, g in vision_gates.items()}}
         out_dict["gate_records"] = records
         print(json.dumps(out_dict, indent=2))
-        return 0 if gate.passed else 1
+        return 0 if overall else 1
 
-    status_style = "bold green" if gate.passed else "bold red"
-    console.print(f"[{status_style}]Direction Set: {'PASSED' if gate.passed else 'FAILED'}[/] - {args.source} ({len(frames)} views, score {gate.score:.2f})")
+    status_style = "bold green" if overall else "bold red"
+    console.print(f"[{status_style}]Direction Set: {'PASSED' if overall else 'FAILED'}[/] - {args.source} ({len(frames)} views, score {gate.score:.2f})")
     console.print(f"Summary: {escape(gate.summary)}\n")
     table = Table(title="Views vs anchor", show_header=True)
     table.add_column("Facing", style="cyan")
@@ -380,9 +426,17 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
         console.print(f" {mark:>14} {name}: {escape(str(c['detail']))}")
     for wmsg in gate.warnings:
         console.print(f"   [yellow]warning:[/] {escape(wmsg)}")
+    if vision_gate is not None:
+        console.print(f"\n[bold]Vision vs anchor ({args.anchor_facing}):[/] {escape(vision_gate.summary)}")
+        for facing, g in vision_gates.items():
+            mark = "[green]ok[/]" if g.passed else "[red]FAIL[/]"
+            detail = g.errors[0] if g.errors else g.summary
+            console.print(f" {mark:>14} {facing}: {escape(detail)}")
+            for extra in g.errors[1:4]:
+                console.print(f"                {escape(extra)}")
     if records:
         console.print(f"[dim]gate records: {len(records)} written ({Path(records[0]).name}, ...)[/]")
-    return 0 if gate.passed else 1
+    return 0 if overall else 1
 
 
 def cmd_judge_anim(args: argparse.Namespace) -> int:
@@ -948,6 +1002,9 @@ def main(argv: list[str] | None = None) -> None:
     p_still.add_argument("--char-id", help="CharacterIdentity slug: supplies palette, cell size, feature markers and the south reference still")
     p_still.add_argument("--reference", help="Approved anchor image: vision compares candidate vs anchor side by side "
                                              "(parts added/removed/moved, hands, camera); offline = FAIL, never a silent accept")
+    p_still.add_argument("--anchor-facing", default="south",
+                         help="Facing of the --reference anchor (default south); with --facing it tells the model which "
+                              "parts the turn hides")
     p_still.add_argument("--vision", action="store_true", help="Run multimodal vision model smell-test & Jev decision orchestration")
     p_still.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_still.add_argument("--desc", help="Expected visual description of character/object")
@@ -967,6 +1024,14 @@ def main(argv: list[str] | None = None) -> None:
     p_views.add_argument("--ground-tolerance", type=int, default=1, help="Allowed ground-row difference in px (default 1)")
     p_views.add_argument("--height-tolerance", type=int, default=2, help="Allowed drawn-height difference in px (default 2)")
     p_views.add_argument("--area-tolerance", type=float, default=0.20, help="Allowed opaque-area ratio difference (default 0.20)")
+    p_views.add_argument("--vision", action="store_true",
+                         help="Also compare EVERY view with the anchor by vision model (one paid call per view): invented "
+                              "parts and parts missing though they should be visible FAIL, parts hidden by the turn do "
+                              "not; writes gate vision_reference into each view's record. Offline = FAIL")
+    p_views.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
+    p_views.add_argument("--anchor-facing", default="south", help="Facing of the anchor image (default south)")
+    p_views.add_argument("--desc", help="Subject description for the vision comparison (default: the identity's)")
+    p_views.add_argument("--perspective", default="low top-down", help="Expected camera perspective")
     p_views.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_views.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_views.set_defaults(func=cmd_judge_views)

@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 import httpx
@@ -43,10 +44,53 @@ class ReferenceDifference(BaseModel):
     detail: str = ""
 
 
+class PartNote(BaseModel):
+    """One part the model points at: what, where on the sprite, roughly how big, and why."""
+    part: str = ""
+    location: str = ""
+    size: str = ""
+    detail: str = ""
+
+    def text(self) -> str:
+        bits = [self.part or "unnamed part"]
+        if self.location:
+            bits.append(f"at {self.location}")
+        if self.size:
+            bits.append(f"(~{self.size})")
+        if self.detail:
+            bits.append(f"- {self.detail}")
+        return " ".join(bits)
+
+
+ELEVATION_TOLERANCE_DEGREES = 15
+# A "missing" part whose own explanation is the turn is not missing: it is expected to be hidden.
+_OCCLUSION_RE = re.compile(
+    r"turned away|facing away|faces away|occlud|hidden|not visible from|out of view|out of sight|"
+    r"on the (?:far|other|opposite) side|behind the (?:body|head|torso)|blocked by|obscured",
+    re.IGNORECASE,
+)
+
+
 class ReferenceComparison(BaseModel):
-    """Structured diff between an approved anchor and a candidate view/frame."""
+    """Structured comparison of a candidate view/frame against the approved anchor.
+
+    What fails (see ``failures``): parts the candidate INVENTED (no counterpart anywhere on the
+    anchor's design), parts that should be visible from the candidate's facing but are missing,
+    a different character, or a camera elevation more than ~15 degrees off. Parts hidden because
+    the character turned (``expected_hidden_parts``) are informational and never fail.
+    """
     status: str  # match | mismatch | unavailable | error
     model_used: str = ""
+    anchor_facing: str | None = None
+    candidate_facing: str | None = None
+    invented_parts: list[PartNote] = Field(default_factory=list)
+    missing_visible_parts: list[PartNote] = Field(default_factory=list)
+    changed_parts: list[PartNote] = Field(default_factory=list)
+    expected_hidden_parts: list[PartNote] = Field(default_factory=list)
+    tool_sides: dict[str, Any] = Field(default_factory=dict)
+    anchor_elevation: int | None = None
+    candidate_elevation: int | None = None
+    # Legacy fields (the first comparison prompt asked for a flat list of differences and hands).
     differences: list[ReferenceDifference] = Field(default_factory=list)
     reference_hands: dict[str, str] = Field(default_factory=dict)
     candidate_hands: dict[str, str] = Field(default_factory=dict)
@@ -60,6 +104,104 @@ class ReferenceComparison(BaseModel):
 
     def anomalies(self) -> list[ReferenceDifference]:
         return [d for d in self.differences if d.kind in ("added", "removed", "moved", "resized")]
+
+    def elevation_gap(self) -> int | None:
+        a = self.anchor_elevation if self.anchor_elevation is not None else self.reference_camera_elevation_degrees
+        c = self.candidate_elevation if self.candidate_elevation is not None else self.candidate_camera_elevation_degrees
+        if a is None or c is None:
+            return None
+        return abs(int(c) - int(a))
+
+    def failures(self) -> list[str]:
+        """The verdict rule: every reason this candidate does not match the anchor (empty = match)."""
+        out = [f"invented: {p.text()} -- no counterpart on the anchor's design" for p in self.invented_parts]
+        where = f" from {self.candidate_facing}" if self.candidate_facing else ""
+        out += [f"missing: {p.text()} -- should be visible{where}" for p in self.missing_visible_parts]
+        if self.same_character is False:
+            out.append("identity: the model does not read the candidate as the same character")
+        gap = self.elevation_gap()
+        if gap is not None and gap > ELEVATION_TOLERANCE_DEGREES:
+            a = self.anchor_elevation if self.anchor_elevation is not None else self.reference_camera_elevation_degrees
+            c = self.candidate_elevation if self.candidate_elevation is not None else self.candidate_camera_elevation_degrees
+            out.append(f"perspective: candidate camera {c} deg vs anchor {a} deg "
+                       f"(more than {ELEVATION_TOLERANCE_DEGREES} deg apart)")
+        return out
+
+
+def _part_notes(raw: Any) -> list[PartNote]:
+    notes: list[PartNote] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            part = str(item.get("part") or item.get("name") or item.get("element") or "").strip()
+            note = PartNote(
+                part=part,
+                location=str(item.get("location") or item.get("where") or "").strip(),
+                size=str(item.get("size") or item.get("size_estimate") or "").strip(),
+                detail=str(item.get("detail") or item.get("change") or item.get("reason") or item.get("why") or "").strip(),
+            )
+        elif isinstance(item, str) and item.strip():
+            note = PartNote(part=item.strip())
+        else:
+            continue
+        if note.part or note.detail:
+            notes.append(note)
+    return notes
+
+
+def _degrees(value: Any) -> int | None:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_reference_response(
+    parsed: dict[str, Any],
+    *,
+    model: str = "",
+    cost: float | None = None,
+    facing: str | None = None,
+    anchor_facing: str | None = "south",
+) -> ReferenceComparison:
+    """Turn the vision model's JSON into a comparison and apply the verdict rule.
+
+    The model's own "verdict" is not trusted: status is ``match`` only when ``failures()``
+    is empty. A "missing" part whose explanation is the turn itself ("absent as it is turned
+    away") is moved to ``expected_hidden_parts``: occlusion is expected, never a defect.
+    """
+    missing: list[PartNote] = []
+    hidden = _part_notes(parsed.get("expected_hidden_parts"))
+    for note in _part_notes(parsed.get("missing_visible_parts")):
+        if _OCCLUSION_RE.search(f"{note.part} {note.detail} {note.location}"):
+            hidden.append(note)
+        else:
+            missing.append(note)
+    sides = parsed.get("tool_sides")
+    same = parsed.get("same_character")
+    comparison = ReferenceComparison(
+        status="match",
+        model_used=model,
+        anchor_facing=anchor_facing,
+        candidate_facing=facing,
+        invented_parts=_part_notes(parsed.get("invented_parts")),
+        missing_visible_parts=missing,
+        changed_parts=_part_notes(parsed.get("changed_parts")),
+        expected_hidden_parts=hidden,
+        tool_sides=sides if isinstance(sides, dict) else {},
+        anchor_elevation=_degrees(parsed.get("anchor_elevation")),
+        candidate_elevation=_degrees(parsed.get("candidate_elevation")),
+        same_character=same if isinstance(same, bool) else None,
+        notes=str(parsed.get("notes", "")),
+        cost_usd=cost,
+    )
+    comparison.reference_camera_elevation_degrees = comparison.anchor_elevation
+    comparison.candidate_camera_elevation_degrees = comparison.candidate_elevation
+    gap = comparison.elevation_gap()
+    comparison.perspective_match = None if gap is None else gap <= ELEVATION_TOLERANCE_DEGREES
+    failures = comparison.failures()
+    comparison.status = "mismatch" if failures else "match"
+    comparison.verdict = comparison.status
+    return comparison
 
 
 class OrchestratedVerdict(BaseModel):
@@ -132,6 +274,60 @@ def prepare_pair_for_vision(
     return board
 
 
+def reference_prompt(
+    *,
+    candidate_facing: str,
+    anchor_facing: str = "south",
+    description: str = "",
+    expected_perspective: str = "low top-down (approx 20-30 degrees)",
+) -> str:
+    """The comparison question. Primary: what did the candidate INVENT? Occlusion is not a difference."""
+    turned = candidate_facing != anchor_facing
+    turn_text = (
+        f"The ANCHOR shows the character facing {anchor_facing}. The CANDIDATE should be the SAME character turned to "
+        f"face {candidate_facing}. Because it turned, some faces of the body now point away from the camera: parts on "
+        f"those faces (for a back view: the face, visor, chest details, anything on the front) are EXPECTED to be "
+        f"hidden. Do NOT report them as missing or removed; list them only under expected_hidden_parts."
+        if turned else
+        f"Both images should show the same character facing {anchor_facing} from the same camera."
+    )
+    return f"""You are a pixel-art art director checking a sprite against its approved design, on one board.
+LEFT = ANCHOR (the approved design). RIGHT = CANDIDATE.
+Subject: {description or 'game character'}. Expected camera: {expected_perspective}.
+{turn_text}
+
+Answer these questions in order.
+
+1. INVENTED PARTS (the main question). Look at every element drawn in the CANDIDATE: bolts, bosses, rivets,
+   lights, eyes, handles, antennae, vents, panels, logos, extra limbs, extra wheels, orbs, floating fragments.
+   For each one ask: does this element have a counterpart ANYWHERE on the anchor's design (also on a side the
+   anchor does not show but clearly implies)? List every element that does NOT: the generator made it up.
+   Give its location on the sprite and a size estimate. A round boss or bolt on the back or the sides of the
+   head that the anchor's head does not have is an invented part.
+2. MISSING PARTS. List parts of the anchor's design that SHOULD be visible from the candidate's facing
+   ({candidate_facing}) but are not drawn. Never list a part here because the turn hides it.
+3. CHANGED PARTS. Parts present in both whose size, colour or material changed.
+4. EXPECTED HIDDEN PARTS. Parts of the anchor that the candidate's facing legitimately hides (information only).
+5. HELD TOOLS. For each held tool or attachment: which of the CHARACTER'S OWN sides (left/right) it is on, in
+   the anchor and in the candidate.
+6. CAMERA. The camera elevation of each image in degrees (0 = side view, 90 = straight down).
+7. Is it the same character?
+
+Return a single JSON object with exactly these keys:
+{{
+  "invented_parts": [{{"part": string, "location": string, "size": string}}],
+  "missing_visible_parts": [{{"part": string, "location": string, "detail": string}}],
+  "changed_parts": [{{"part": string, "detail": string}}],
+  "expected_hidden_parts": [string],
+  "tool_sides": {{"anchor": {{"<tool>": "left|right|none"}}, "candidate": {{"<tool>": "left|right|none"}}}},
+  "anchor_elevation": integer,
+  "candidate_elevation": integer,
+  "same_character": boolean,
+  "notes": string (1-2 sentences)
+}}
+Empty lists are the right answer when nothing applies. Only return valid JSON."""
+
+
 def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -> GateResult:
     """Turn a comparison into a hard gate: anomalies, perspective mismatch and 'unavailable' all fail."""
     where = f" ({facing})" if facing else ""
@@ -149,16 +345,16 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
             errors=[f"error: {comparison.notes}"],
             metrics={"status": "error", "model": comparison.model_used},
         )
-    errors: list[str] = []
-    for d in comparison.anomalies():
+    # The verdict rule: invented parts, parts missing though they should be visible, another
+    # character, or a camera more than ~15 degrees off. Occlusion by the turn never fails.
+    errors: list[str] = list(comparison.failures())
+    for d in comparison.anomalies():  # legacy flat differences
         errors.append(f"{d.kind}: {d.part} {('- ' + d.detail) if d.detail else ''}".strip())
-    if comparison.perspective_match is False:
+    if comparison.perspective_match is False and not any(e.startswith("perspective:") for e in errors):
         errors.append(
             f"perspective: candidate camera {comparison.candidate_camera_elevation_degrees} deg vs reference "
             f"{comparison.reference_camera_elevation_degrees} deg"
         )
-    if comparison.same_character is False:
-        errors.append("identity: the model does not read the candidate as the same character")
     if comparison.reference_hands and comparison.candidate_hands:
         for hand in ("left", "right"):
             r = (comparison.reference_hands.get(hand) or "").strip().lower()
@@ -169,6 +365,16 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
         errors.append(f"mismatch: {comparison.verdict or comparison.notes or 'model reported a mismatch'}")
     passed = not errors
     other = [d for d in comparison.differences if d not in comparison.anomalies()]
+    warnings = [f"{d.kind}: {d.part} {d.detail}".strip() for d in other]
+    warnings += [f"changed: {p.text()}" for p in comparison.changed_parts]
+    sides = comparison.tool_sides
+    if isinstance(sides.get("anchor"), dict) and isinstance(sides.get("candidate"), dict):
+        for tool, side in sides["anchor"].items():
+            other_side = sides["candidate"].get(tool)
+            if side and other_side and str(side).strip().lower() != str(other_side).strip().lower():
+                warnings.append(f"tool side: {tool} reads as {other_side} in the candidate, {side} on the anchor "
+                                f"(check with judge-views' marker-based tool-side check)")
+    hidden = [p.text() for p in comparison.expected_hidden_parts]
     return GateResult(
         name="vision_reference",
         passed=passed,
@@ -176,10 +382,17 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
         summary=(f"Matches the reference{where}: {comparison.notes or comparison.verdict}" if passed
                  else f"Differs from the reference{where}: {errors[0]}"),
         errors=errors,
-        warnings=[f"{d.kind}: {d.part} {d.detail}".strip() for d in other],
+        warnings=warnings,
         metrics={
             "status": comparison.status,
             "model": comparison.model_used,
+            "invented_parts": len(comparison.invented_parts),
+            "missing_visible_parts": len(comparison.missing_visible_parts),
+            "changed_parts": len(comparison.changed_parts),
+            "expected_hidden_parts": hidden,
+            "tool_sides": comparison.tool_sides,
+            "anchor_elevation": comparison.anchor_elevation,
+            "candidate_elevation": comparison.candidate_elevation,
             "differences": len(comparison.differences),
             "anomalies": len(comparison.anomalies()),
             "perspective_match": comparison.perspective_match,
@@ -301,12 +514,17 @@ Only return valid JSON."""
         reference: Image.Image,
         *,
         facing: str | None = None,
+        anchor_facing: str = "south",
         description: str = "",
         expected_perspective: str = "low top-down (approx 20-30 degrees)",
         zoom: int = 6,
     ) -> ReferenceComparison:
-        """Anchor + candidate on one board; ask for a structured diff and a verdict.
+        """Anchor + candidate on one board; ask what the candidate INVENTED and what it lost.
 
+        ``facing`` is the candidate's facing (default: the anchor's), ``anchor_facing`` the
+        anchor's. The model is told that parts on faces turned away from the camera are
+        expected to be hidden; the verdict comes from ``parse_reference_response`` (invented
+        parts, missing-but-should-be-visible parts, another character, elevation > ~15 deg).
         Offline (no key) returns status ``unavailable``: the caller's gate must fail, never accept.
         """
         if not self.is_available():
@@ -316,31 +534,14 @@ Only return valid JSON."""
                 notes="No vision model available (OPENROUTER_API_KEY not configured or SPRITEWARDEN_OFFLINE set)",
             )
 
-        facing_text = (
-            f"The candidate is the same character turned to face {facing}; parts may be hidden by the turn, "
-            f"but nothing may be added, and held tools must stay in the same hands."
-            if facing else "The candidate should show the same character from the same camera."
+        candidate_facing = facing or anchor_facing
+        prompt = reference_prompt(
+            candidate_facing=candidate_facing,
+            anchor_facing=anchor_facing,
+            description=description,
+            expected_perspective=expected_perspective,
         )
-        prompt = f"""You are a pixel-art art director comparing two sprites on one board.
-LEFT = REFERENCE (the approved anchor). RIGHT = CANDIDATE.
-Subject: {description or 'game character'}. Expected camera: {expected_perspective}. {facing_text}
-
-List EVERY difference from the reference. Return a single JSON object with exactly these keys:
-{{
-  "differences": [{{"kind": "added|removed|moved|resized|recolored|other", "part": string, "detail": string}}],
-  "reference_hands": {{"left": string, "right": string}} (what each hand holds, 'none' if empty),
-  "candidate_hands": {{"left": string, "right": string}},
-  "reference_camera_elevation_degrees": integer (0 = side view, 90 = top down),
-  "candidate_camera_elevation_degrees": integer,
-  "perspective_match": boolean (same camera elevation within ~15 degrees and same projection),
-  "same_character": boolean,
-  "verdict": "match" or "mismatch",
-  "notes": string (1-2 sentences)
-}}
-Rules: a part present in one image and absent in the other is 'added' or 'removed' (floating fragments,
-orbs, extra limbs count). A tool in a different hand is 'moved'. Report 'match' only when there are no
-added/removed/moved/resized differences and the perspective matches. Only return valid JSON."""
-        board = prepare_pair_for_vision(reference, candidate, zoom=zoom)
+        board = prepare_pair_for_vision(reference, candidate, zoom=zoom, labels=("ANCHOR", "CANDIDATE"))
         content = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": _to_data_url(board)}},
@@ -349,31 +550,8 @@ added/removed/moved/resized differences and the perspective matches. Only return
         if err or not isinstance(parsed, dict):
             return ReferenceComparison(status="error", model_used=self.vision_model, notes=err or "unparseable response")
 
-        diffs = []
-        for d in parsed.get("differences", []) or []:
-            if isinstance(d, dict):
-                diffs.append(ReferenceDifference(
-                    kind=str(d.get("kind", "other")).lower().strip(),
-                    part=str(d.get("part", "")),
-                    detail=str(d.get("detail", "")),
-                ))
-            elif isinstance(d, str):
-                diffs.append(ReferenceDifference(kind="other", part=d))
-        verdict = str(parsed.get("verdict", "")).lower().strip()
-        status = "match" if verdict == "match" else "mismatch"
-        return ReferenceComparison(
-            status=status,
-            model_used=self.vision_model,
-            differences=diffs,
-            reference_hands={k: str(v) for k, v in (parsed.get("reference_hands") or {}).items()},
-            candidate_hands={k: str(v) for k, v in (parsed.get("candidate_hands") or {}).items()},
-            reference_camera_elevation_degrees=parsed.get("reference_camera_elevation_degrees"),
-            candidate_camera_elevation_degrees=parsed.get("candidate_camera_elevation_degrees"),
-            perspective_match=parsed.get("perspective_match"),
-            same_character=parsed.get("same_character"),
-            verdict=verdict,
-            notes=str(parsed.get("notes", "")),
-            cost_usd=cost,
+        return parse_reference_response(
+            parsed, model=self.vision_model, cost=cost, facing=candidate_facing, anchor_facing=anchor_facing
         )
 
     def orchestrate_judgment(

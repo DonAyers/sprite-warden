@@ -271,6 +271,56 @@ def check_direction_set(
     )
 
 
+def compare_views_to_anchor(
+    frames: dict[str, Image.Image],
+    anchor: Image.Image,
+    judge: Any,
+    *,
+    anchor_facing: str = "south",
+    skip_anchor_view: bool = False,
+    description: str = "",
+    expected_perspective: str = "low top-down (approx 20-30 degrees)",
+) -> dict[str, GateResult]:
+    """Reference-aware vision for every view of a set: facing -> ``vision_reference`` gate.
+
+    Each view is compared with the anchor by ``judge.compare_to_reference`` with the view's
+    facing and the anchor's facing in the prompt (parts hidden by the turn are expected;
+    invented parts fail). One paid model call per view: opt-in (``judge-views --vision``).
+    ``skip_anchor_view`` leaves out the view that IS the anchor.
+    """
+    from .vision import reference_gate
+
+    anchor_canon = canonical_facing(anchor_facing) or anchor_facing
+    out: dict[str, GateResult] = {}
+    for name, img in frames.items():
+        facing = canonical_facing(name) or name
+        if skip_anchor_view and facing == anchor_canon:
+            continue
+        comparison = judge.compare_to_reference(
+            img, anchor, facing=facing, anchor_facing=anchor_canon,
+            description=description, expected_perspective=expected_perspective,
+        )
+        out[facing] = reference_gate(comparison, facing=facing)
+    return out
+
+
+def vision_summary_gate(per_view: dict[str, GateResult]) -> GateResult:
+    """One ``vision_reference`` gate for a whole set (a strip has a single record)."""
+    failed = {f: g for f, g in per_view.items() if not g.passed}
+    errors = [f"{f}: {e}" for f, g in failed.items() for e in g.errors[:3]]
+    return GateResult(
+        name="vision_reference",
+        passed=not failed and bool(per_view),
+        score=round(sum(g.score for g in per_view.values()) / len(per_view), 3) if per_view else 0.0,
+        summary=(f"All {len(per_view)} view(s) match the anchor" if per_view and not failed
+                 else (f"{len(failed)} of {len(per_view)} view(s) differ from the anchor: {', '.join(failed)}"
+                       if per_view else "No views were compared")),
+        errors=errors or ([] if per_view else ["no views compared"]),
+        warnings=[f"{f}: {w}" for f, g in per_view.items() for w in g.warnings[:3]],
+        metrics={"views": {f: g.passed for f, g in per_view.items()}},
+    )
+
+
 def direction_frame_files(folder: str | Path) -> dict[str, Path]:
     """Map facing -> PNG path for a folder of <facing>.png (or <prefix>_<facing>.png) files."""
     out: dict[str, Path] = {}
