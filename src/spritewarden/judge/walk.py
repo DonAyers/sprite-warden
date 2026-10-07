@@ -38,19 +38,56 @@ def _find_feet(image: Image.Image, x_mid: int, band: int) -> tuple[int | None, i
     return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
-def _base_band(image: Image.Image, band: int) -> tuple[tuple[int, int, int, int] | None, Image.Image | None]:
-    """Bounding box and crop of the bottom ``band`` rows of the drawn sprite (the wheel / treads)."""
+def _base_band(
+    image: Image.Image, band: int
+) -> tuple[tuple[int, int, int, int] | None, Image.Image | None, dict | None]:
+    """The wheel / tread mass in the bottom ``band`` rows of the drawn sprite.
+
+    The band can hold more than the wheel: a held tool hanging beside it, a dangling
+    cable. Only the connected mass that carries the ground-contact pixels (the lowest
+    drawn row) is the base; other masses in the band are ignored and reported.
+    Returns (bbox of that mass, crop with every other pixel cleared, info).
+    """
+    from .animation import _connected_pieces
+
     alpha = image.getchannel("A").point(lambda v: 255 if v > 127 else 0)
     box = alpha.getbbox()
     if not box:
-        return None, None
+        return None, None, None
     y0 = max(box[1], box[3] - band)
-    strip = alpha.crop((0, y0, image.width, box[3]))
-    sb = strip.getbbox()
-    if sb is None:
-        return None, None
-    bbox = (sb[0], y0 + sb[1], sb[2], y0 + sb[3])
-    return bbox, image.crop(bbox)
+    ground = box[3] - 1
+    px = alpha.load()
+    coords = {(x, y) for y in range(y0, box[3]) for x in range(box[0], box[2]) if px[x, y]}
+    if not coords:
+        return None, None, None
+    pieces = _connected_pieces(coords)
+    contact = [sum(1 for (_, y) in p if y == ground) for p in pieces]
+    best = max(range(len(pieces)), key=lambda i: (contact[i], len(pieces[i])))
+    mass = pieces[best]
+    xs = [x for x, _ in mass]
+    ys = [y for _, y in mass]
+    bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    crop = Image.new("RGBA", (bbox[2] - bbox[0], bbox[3] - bbox[1]), (0, 0, 0, 0))
+    src = image.load()
+    dst = crop.load()
+    for x, y in mass:
+        dst[x - bbox[0], y - bbox[1]] = src[x, y]
+    ignored = []
+    for i, p in enumerate(pieces):
+        if i == best:
+            continue
+        pxs = [x for x, _ in p]
+        pys = [y for _, y in p]
+        ignored.append({"pixels": len(p), "bbox": [min(pxs), min(pys), max(pxs) + 1, max(pys) + 1],
+                        "ground_contact_px": contact[i]})
+    info = {
+        "bbox": list(bbox),
+        "pixels": len(mass),
+        "ground_contact_px": contact[best],
+        "masses_in_band": len(pieces),
+        "ignored": sorted(ignored, key=lambda m: -m["pixels"]),
+    }
+    return bbox, crop, info
 
 
 def _check_rolling_base(frames: list[Image.Image], locomotion: str, band: int, lift_thresh: int) -> GateResult:
@@ -60,16 +97,19 @@ def _check_rolling_base(frames: list[Image.Image], locomotion: str, band: int, l
     centers: list[float] = []
     crops: list[Image.Image] = []
     frame_stats = []
+    ignored_frames: list[int] = []
     for i, frame in enumerate(frames):
-        bbox, crop = _base_band(frame, band)
-        if bbox is None or crop is None:
+        bbox, crop, info = _base_band(frame, band)
+        if bbox is None or crop is None or info is None:
             continue
         ground_rows.append(bbox[3] - 1)
         widths.append(bbox[2] - bbox[0])
         centers.append((bbox[0] + bbox[2]) / 2.0)
         crops.append(crop)
+        if info["ignored"]:
+            ignored_frames.append(i)
         frame_stats.append({"frame": i, "ground_row": bbox[3] - 1, "base_width": bbox[2] - bbox[0],
-                            "base_center_x": round((bbox[0] + bbox[2]) / 2.0, 1)})
+                            "base_center_x": round((bbox[0] + bbox[2]) / 2.0, 1), "base_mass": info})
     if not ground_rows:
         return GateResult(
             name="walk_mechanics", passed=False, score=0.0,
@@ -108,6 +148,16 @@ def _check_rolling_base(frames: list[Image.Image], locomotion: str, band: int, l
     elif static_steps:
         warnings.append(f"The {locomotion} band is frozen across step(s) {static_steps}")
 
+    first_mass = frame_stats[0]["base_mass"]
+    mass_note = (f"base = the ground-contact mass (frame {frame_stats[0]['frame']}: {first_mass['pixels']}px at "
+                 f"{first_mass['bbox']}, {first_mass['ground_contact_px']}px on the ground)")
+    if ignored_frames:
+        biggest = max((m for s in frame_stats for m in s["base_mass"]["ignored"]), key=lambda m: m["pixels"])
+        warnings.append(
+            f"{mass_note}; other mass(es) in the bottom {band} rows were ignored in frame(s) {ignored_frames} "
+            f"(largest {biggest['pixels']}px at {biggest['bbox']}): a held tool or part beside the base is not the base"
+        )
+
     passed = not errors
     score = 1.0 if passed else max(0.0, 1.0 - 0.3 * len(errors))
     summary = (
@@ -124,6 +174,9 @@ def _check_rolling_base(frames: list[Image.Image], locomotion: str, band: int, l
             "base_widths": widths,
             "base_centers": [round(c, 1) for c in centers],
             "static_steps": static_steps,
+            "base_mass": first_mass,
+            "base_mass_note": mass_note,
+            "frames_with_ignored_masses": ignored_frames,
         },
         details={"frame_base": frame_stats},
     )

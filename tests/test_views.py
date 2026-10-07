@@ -87,6 +87,37 @@ def test_four_views_and_anchor_override():
     assert too_few.passed is False and "Need 4-8" in too_few.summary
 
 
+def test_anchor_on_another_canvas_does_not_compare_ground_rows():
+    # Real case: a 96x96 anchor (ground row 76) vs 60x60 views (ground row 58) gave eight false failures.
+    views = {f: _view(canvas=60, ground=58) for f in GAME_ORDER}
+    anchor = _view(canvas=96, ground=76)
+    gate = check_direction_set(views, anchor=anchor)
+    assert gate.passed, gate.errors
+    assert gate.metrics["anchor_canvas_differs"] is True and gate.metrics["ground_reference"] == 58
+    assert gate.details["checks"]["ground_row"]["passed"] is True
+    assert "views' ground row 58" in gate.details["checks"]["ground_row"]["detail"]
+    assert gate.details["checks"]["anchor_canvas"]["passed"] is None
+    assert any(w.startswith("note: anchor canvas differs (96x96 vs views 60x60)") for w in gate.warnings)
+
+    # ground-row consistency is still checked among the views
+    views["east"] = _view(canvas=60, ground=55)
+    gate = check_direction_set(views, anchor=anchor)
+    assert gate.details["checks"]["ground_row"]["passed"] is False
+    assert "east" in gate.details["checks"]["ground_row"]["detail"]
+
+    # ... and the anchor still supplies content height and area
+    views = {f: _view(canvas=60, ground=58, body_h=22) for f in GAME_ORDER}
+    gate = check_direction_set(views, anchor=anchor)
+    assert gate.details["checks"]["ground_row"]["passed"] is True
+    assert gate.details["checks"]["height"]["passed"] is False and gate.details["checks"]["area"]["passed"] is False
+
+    # the same canvas keeps the absolute comparison
+    views = {f: _view(ground=43) for f in GAME_ORDER}
+    gate = check_direction_set(views, anchor=_view(ground=40))
+    assert gate.metrics["anchor_canvas_differs"] is False
+    assert gate.details["checks"]["ground_row"]["passed"] is False
+
+
 def test_tool_side_expectation_table():
     ident = CharacterIdentity(
         id="t", name="T", prompt_description="bot",

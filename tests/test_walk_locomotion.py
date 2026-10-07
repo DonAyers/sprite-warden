@@ -62,6 +62,32 @@ def test_hub_width_and_drift_fail():
     assert res.passed is False and any("drifts" in e for e in res.errors)
 
 
+def _with_tool(img: Image.Image, x: int, top: int = 20, bottom: int = 26) -> Image.Image:
+    """A held tool hanging beside the wheel, inside the bottom band but off the ground."""
+    for y in range(top, bottom + 1):
+        img.putpixel((x, y), SPOKE)
+        img.putpixel((x + 1, y), SPOKE)
+    return img
+
+
+def test_a_held_tool_swinging_beside_the_wheel_is_not_the_wheel():
+    # The tool moves 3px between frames; over the whole band that changed the "hub" width and centre.
+    frames = [_with_tool(_wheel_bot(i), x=(25, 28, 25, 28)[i]) for i in range(4)]
+    res = check_walk_cycle(frames, locomotion="wheels", band=8)
+    assert res.passed, res.errors
+    assert res.metrics["base_widths"] == [10, 10, 10, 10]
+    mass = res.metrics["base_mass"]
+    assert mass["bbox"] == [11, 22, 21, 30] and mass["ground_contact_px"] == 10 and mass["masses_in_band"] == 2
+    assert res.metrics["frames_with_ignored_masses"] == [0, 1, 2, 3]
+    assert any("ground-contact mass" in w and "were ignored" in w for w in res.warnings)
+    # the wheel itself misbehaving is still caught with the tool present
+    frames = [_with_tool(_wheel_bot(i, hub_w=(14 if i == 2 else 10)), x=25) for i in range(4)]
+    assert check_walk_cycle(frames, locomotion="wheels", band=8).passed is False
+    # a wheel alone reports its mass and ignores nothing
+    alone = check_walk_cycle([_wheel_bot(i) for i in range(4)], locomotion="wheels", band=8)
+    assert alone.metrics["base_mass"]["masses_in_band"] == 1 and alone.metrics["frames_with_ignored_masses"] == []
+
+
 def test_frozen_wheel_warns():
     frames = [_wheel_bot(0) for _ in range(4)]
     res = check_walk_cycle(frames, locomotion="wheels", band=8)

@@ -153,9 +153,27 @@ def check_direction_set(
         f"all views {sizes[0][0]}x{sizes[0][1]}" if len(sizes) == 1 else f"mixed canvas sizes: {sizes}",
     )
 
-    # 1. Ground row within +-1 of the anchor
-    off = {f: st["ground_row"] - a_stats["ground_row"] for f, st in stats.items() if abs(st["ground_row"] - a_stats["ground_row"]) > ground_tolerance}
-    record("ground_row", not off, f"anchor ground row {a_stats['ground_row']}" + (f"; off by {off}" if off else ", all views within +-%d" % ground_tolerance))
+    # 1. Ground row within +-1 of the anchor. An anchor on another canvas (a 96x96 still vs 60x60
+    #    views) has no comparable absolute row: the views are then checked against each other and
+    #    the anchor contributes its content height and area only.
+    anchor_size = tuple(a_stats["size"])
+    anchor_differs = anchor is not None and bool(stats) and any(tuple(st["size"]) != anchor_size for st in stats.values())
+    metrics["anchor_canvas_differs"] = anchor_differs
+    if anchor_differs:
+        rows = [st["ground_row"] for st in stats.values()]
+        ref_ground = stats["south"]["ground_row"] if "south" in stats else max(set(rows), key=rows.count)
+        ref_label = f"views' ground row {ref_ground} (from {'south' if 'south' in stats else 'the most common row'})"
+        note = (f"anchor canvas differs ({anchor_size[0]}x{anchor_size[1]} vs views {sizes[0][0]}x{sizes[0][1]}): "
+                f"its ground row {a_stats['ground_row']} is not compared; ground row is checked among the views, "
+                f"the anchor supplies content height and area only")
+        checks["anchor_canvas"] = {"passed": None, "detail": note}
+        warnings.append(f"note: {note}")
+    else:
+        ref_ground = a_stats["ground_row"]
+        ref_label = f"anchor ground row {ref_ground}"
+    metrics["ground_reference"] = ref_ground
+    off = {f: st["ground_row"] - ref_ground for f, st in stats.items() if abs(st["ground_row"] - ref_ground) > ground_tolerance}
+    record("ground_row", not off, ref_label + (f"; off by {off}" if off else ", all views within +-%d" % ground_tolerance))
 
     # 2. Content height within +-2px of the anchor
     off = {f: st["height"] - a_stats["height"] for f, st in stats.items() if abs(st["height"] - a_stats["height"]) > height_tolerance}
