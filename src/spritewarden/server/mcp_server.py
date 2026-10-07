@@ -236,8 +236,11 @@ def judge_still(
     margin_px: Annotated[int, Field(description="Required transparent margin for start_image (default 3)")] = 3,
     facing: Annotated[str, Field(description="Facing of the start image (south/north enable symmetry)")] = "south",
     character_id: Annotated[str | None, Field(description="CharacterIdentity slug supplying palette, cell size and feature markers")] = None,
+    write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside the image (sha256 + verdicts) so later stages can prove it was gated")] = True,
 ) -> dict:
     """Run pixel grid, palette conformity, edge clipping, symmetry and (opt-in) start-image readiness gates on a still image."""
+    from ..gates import gates_from_scorecard, write_record
+
     identity = get_catalog().get_identity(character_id) if character_id else None
     card = evaluate_still(
         image_or_path=file_path,
@@ -252,6 +255,7 @@ def judge_still(
         identity=identity,
     )
     out = card.model_dump()
+    verdict = None
     if vision:
         from PIL import Image
         img = Image.open(file_path).convert("RGBA")
@@ -263,6 +267,21 @@ def judge_still(
             expected_perspective=perspective,
         )
         out["orchestrated_verdict"] = verdict.model_dump()
+    overall = verdict.passed if verdict else card.passed
+    out["passed"] = bool(overall)
+    if write_gate_record:
+        gates = gates_from_scorecard(card)
+        if verdict:
+            gates["vision"] = {"passed": bool(verdict.passed), "score": round(verdict.production_ready_prob, 3),
+                               "summary": verdict.reasoning_summary}
+        gates["still"] = {"passed": bool(overall)}
+        try:
+            out["gate_record"] = str(write_record(file_path, gates, params={
+                "command": "judge_still", "palette": palette, "start_image": start_image, "target_height": target_height,
+                "size_tier": size_tier, "margin_px": margin_px, "facing": facing, "character_id": character_id, "vision": vision,
+            }))
+        except Exception as exc:  # noqa: BLE001
+            out["gate_record_error"] = str(exc)
     return out
 
 
@@ -273,17 +292,45 @@ def judge_direction_set(
     anchor_path: Annotated[str | None, Field(description="Anchor image to compare against (default: the south view)")] = None,
     palette: Annotated[str | None, Field(description="Target palette to check, or null to skip")] = "luap-40",
     character_id: Annotated[str | None, Field(description="CharacterIdentity slug; sided marker features (e.g. 'left hand wrench' with marker_hex) enable the tool-side check")] = None,
+    write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside each view (or the strip)")] = True,
 ) -> dict:
     """Cross-view gate for a direction set: same ground row (+-1), drawn height (+-2px), opaque area (+-20%), equal component count (extra parts are named), tool side per facing, palette."""
     from PIL import Image
 
+    from ..gates import gates_from_scorecard, write_record
     from ..judge import check_direction_set, load_direction_frames
+    from ..judge.views import direction_frame_files
 
     identity = get_catalog().get_identity(character_id) if character_id else None
     frames = load_direction_frames(source_path, cell=cell_size)
     anchor = Image.open(anchor_path).convert("RGBA") if anchor_path else None
     gate = check_direction_set(frames, anchor=anchor, identity=identity, palette=palette)
-    return {"source": source_path, "views": list(frames), **gate.model_dump()}
+    out = {"source": source_path, "views": list(frames), **gate.model_dump()}
+    if write_gate_record:
+        src = Path(source_path)
+        targets = list(direction_frame_files(src).values()) if src.is_dir() else [src]
+        gates = gates_from_scorecard(gate)
+        gates["views"] = {"passed": bool(gate.passed), "facings": list(frames)}
+        params = {"command": "judge_direction_set", "cell": cell_size, "anchor": anchor_path, "palette": palette, "character_id": character_id}
+        written = []
+        for t in targets:
+            try:
+                written.append(str(write_record(t, gates, params=params)))
+            except Exception as exc:  # noqa: BLE001
+                out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
+        out["gate_records"] = written
+    return out
+
+
+@mcp.tool()
+def review_check(
+    paths: Annotated[list[str], Field(description="Image files, folders, or glob patterns")],
+    require: Annotated[list[str], Field(description="Gate names that must have passed; any one satisfies (start_image, views, anim, still, direction_set, ...)")] = ["still"],
+) -> dict:
+    """Gatekeeper: report which images lack a current passed gate record (<image>.gate.json whose sha256 matches the file). Refuse to build review pages or derive rotations/animations from files listed under `missing`."""
+    from ..gates import require_passed
+
+    return require_passed(paths, require)
 
 
 @mcp.tool()
@@ -294,13 +341,27 @@ def judge_animation(
     palette: Annotated[str | None, Field(description="Target palette to check")] = "luap-40",
 ) -> dict:
     """Run temporal anomaly, loop smoothness, and walk cadence checks on an animation sequence."""
+    from ..gates import gates_from_scorecard, write_record
+
     card = evaluate_animation(
         frames_or_sheet=sheet_or_dir_path,
         cell=cell_size,
         is_walk=is_walk,
         palette_source=palette,
     )
-    return card.model_dump()
+    out = card.model_dump()
+    src = Path(sheet_or_dir_path)
+    targets = sorted(f for f in src.iterdir() if f.suffix.lower() == ".png") if src.is_dir() else [src]
+    written = []
+    for t in targets:
+        try:
+            written.append(str(write_record(t, gates_from_scorecard(card, "anim"), params={
+                "command": "judge_animation", "cell": cell_size, "is_walk": is_walk, "palette": palette,
+            })))
+        except Exception as exc:  # noqa: BLE001
+            out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
+    out["gate_records"] = written
+    return out
 
 
 @mcp.tool()

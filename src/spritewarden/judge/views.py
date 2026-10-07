@@ -250,6 +250,26 @@ def check_direction_set(
     )
 
 
+def direction_frame_files(folder: str | Path) -> dict[str, Path]:
+    """Map facing -> PNG path for a folder of <facing>.png (or <prefix>_<facing>.png) files."""
+    out: dict[str, Path] = {}
+    for f in sorted(Path(folder).iterdir()):
+        if f.suffix.lower() != ".png" or f.name.endswith(".gate.json"):
+            continue
+        facing = canonical_facing(f.stem)
+        if facing is None:
+            # allow prefixes like "bot_down_right.png": longest facing suffix wins
+            tokens = f.stem.replace("-", "_").split("_")
+            for n in (3, 2, 1):
+                if len(tokens) >= n:
+                    facing = canonical_facing("_".join(tokens[-n:]))
+                    if facing:
+                        break
+        if facing:
+            out[facing] = f
+    return out
+
+
 def load_direction_frames(
     source: str | Path,
     *,
@@ -259,20 +279,8 @@ def load_direction_frames(
     p = Path(source)
     frames: dict[str, Image.Image] = {}
     if p.is_dir():
-        for f in sorted(p.iterdir()):
-            if f.suffix.lower() != ".png" or f.name.endswith(".gate.json"):
-                continue
-            facing = canonical_facing(f.stem)
-            if facing is None:
-                # allow prefixes like "bot_down_right.png": longest facing suffix wins
-                tokens = f.stem.replace("-", "_").split("_")
-                for n in (3, 2, 1):
-                    if len(tokens) >= n:
-                        facing = canonical_facing("_".join(tokens[-n:]))
-                        if facing:
-                            break
-            if facing:
-                frames[facing] = Image.open(f).convert("RGBA")
+        for facing, f in direction_frame_files(p).items():
+            frames[facing] = Image.open(f).convert("RGBA")
         return frames
     sheet = Image.open(p).convert("RGBA")
     if not cell:

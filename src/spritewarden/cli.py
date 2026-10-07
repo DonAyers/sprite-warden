@@ -173,6 +173,30 @@ def _load_identity(char_id: str | None):
     return ident
 
 
+def _record_params(args: argparse.Namespace, command: str, keys: tuple[str, ...]) -> dict:
+    params = {"command": command}
+    for k in keys:
+        v = getattr(args, k, None)
+        if v not in (None, False, ""):
+            params[k] = v
+    return params
+
+
+def _write_records(paths, gates: dict, params: dict, enabled: bool) -> list[str]:
+    """Write <image>.gate.json beside each image; never fails the command."""
+    if not enabled:
+        return []
+    from .gates import write_record
+
+    written: list[str] = []
+    for p in paths:
+        try:
+            written.append(str(write_record(p, gates, params=params)))
+        except Exception as exc:  # noqa: BLE001 - a record is a convenience, the verdict stands
+            console.print(f"[yellow]warning:[/] could not write gate record for {p}: {exc}")
+    return written
+
+
 def cmd_judge_still(args: argparse.Namespace) -> int:
     identity = _load_identity(getattr(args, "char_id", None))
     card = evaluate_still(
@@ -200,12 +224,28 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
             expected_perspective=getattr(args, "perspective", "low top-down"),
         )
 
+    overall = verdict.passed if verdict else card.passed
+    from .gates import gates_from_scorecard
+
+    gates = gates_from_scorecard(card)
+    if verdict:
+        gates["vision"] = {"passed": bool(verdict.passed), "score": round(verdict.production_ready_prob, 3),
+                           "summary": verdict.reasoning_summary}
+    gates["still"] = {"passed": bool(overall)}
+    records = _write_records(
+        [args.image], gates,
+        _record_params(args, "judge-still", ("palette", "scale", "symmetry", "start_image", "target_height",
+                                              "size_tier", "margin", "facing", "char_id", "vision", "vision_model")),
+        not getattr(args, "no_record", False),
+    )
+
     if args.json:
         out_dict = card.model_dump()
         if verdict:
             out_dict["orchestrated_verdict"] = verdict.model_dump()
+        out_dict["gate_records"] = records
         print(json.dumps(out_dict, indent=2))
-        return 0 if (verdict.passed if verdict else card.passed) else 1
+        return 0 if overall else 1
 
     status_style = "bold green" if (verdict.passed if verdict else card.passed) else "bold red"
     status_text = "PASSED" if (verdict.passed if verdict else card.passed) else "FAILED"
@@ -246,7 +286,9 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
             if obs.visual_smell_test_notes:
                 console.print(f" • Visual Smell Test: {obs.visual_smell_test_notes}")
 
-    return 0 if (verdict.passed if verdict else card.passed) else 1
+    for r in records:
+        console.print(f"[dim]gate record: {r}[/]")
+    return 0 if overall else 1
 
 
 def cmd_judge_views(args: argparse.Namespace) -> int:
@@ -271,8 +313,24 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
         area_tolerance=args.area_tolerance,
     )
 
+    from .gates import gates_from_scorecard
+    from .judge.views import direction_frame_files
+
+    src = Path(args.source)
+    targets = list(direction_frame_files(src).values()) if src.is_dir() else [src]
+    gates = gates_from_scorecard(gate)
+    gates["views"] = {"passed": bool(gate.passed), "facings": list(frames)}
+    records = _write_records(
+        targets, gates,
+        _record_params(args, "judge-views", ("cell", "anchor", "palette", "no_palette", "char_id",
+                                              "ground_tolerance", "height_tolerance", "area_tolerance")),
+        not getattr(args, "no_record", False),
+    )
+
     if args.json:
-        print(gate.model_dump_json(indent=2))
+        out_dict = gate.model_dump()
+        out_dict["gate_records"] = records
+        print(json.dumps(out_dict, indent=2))
         return 0 if gate.passed else 1
 
     status_style = "bold green" if gate.passed else "bold red"
@@ -296,6 +354,8 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
         console.print(f" {mark:>14} {name}: {escape(str(c['detail']))}")
     for wmsg in gate.warnings:
         console.print(f"   [yellow]warning:[/] {escape(wmsg)}")
+    if records:
+        console.print(f"[dim]gate records: {len(records)} written ({Path(records[0]).name}, ...)[/]")
     return 0 if gate.passed else 1
 
 
@@ -306,8 +366,21 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         is_walk=args.walk,
         palette_source=args.palette,
     )
+
+    from .gates import gates_from_scorecard
+
+    src = Path(args.path)
+    targets = sorted(f for f in src.iterdir() if f.suffix.lower() == ".png") if src.is_dir() else [src]
+    records = _write_records(
+        targets, gates_from_scorecard(card, "anim"),
+        _record_params(args, "judge-anim", ("cell", "walk", "palette")),
+        not getattr(args, "no_record", False),
+    )
+
     if args.json:
-        print(card.model_dump_json(indent=2))
+        out_dict = card.model_dump()
+        out_dict["gate_records"] = records
+        print(json.dumps(out_dict, indent=2))
         return 0 if card.passed else 1
 
     status_style = "bold green" if card.passed else "bold red"
@@ -331,8 +404,35 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         console.print("\n[yellow]Suggested Actions:[/]")
         for a in card.suggested_actions:
             console.print(f" • {a}")
+    if records:
+        console.print(f"[dim]gate records: {len(records)} written[/]")
 
     return 0 if card.passed else 1
+
+
+def cmd_review_check(args: argparse.Namespace) -> int:
+    from .gates import require_passed
+
+    required = [g.strip() for g in args.require.split(",") if g.strip()]
+    report = require_passed(args.paths, required)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
+
+    if report["ok"]:
+        console.print(f"[bold green]Review check passed:[/] {report['checked']} file(s) carry a current passed "
+                      f"{' / '.join(required)} record")
+        return 0
+    if not report["checked"]:
+        console.print("[bold red]Review check failed:[/] no image files found")
+        return 1
+    console.print(f"[bold red]Review check failed:[/] {len(report['missing'])} of {report['checked']} file(s) lack a current passed "
+                  f"{' / '.join(required)} record")
+    for m in report["missing"]:
+        have = f" (has: {', '.join(m['passed'])})" if m.get("passed") else ""
+        console.print(f" • {m['path']}: {m['reason']}{have}")
+    console.print("[dim]Gate them first: warden judge-still --start-image / judge-views / judge-anim[/]")
+    return 1
 
 
 def cmd_repo_search(args: argparse.Namespace) -> int:
@@ -669,6 +769,7 @@ def main() -> None:
     p_still.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_still.add_argument("--desc", help="Expected visual description of character/object")
     p_still.add_argument("--perspective", default="low top-down", help="Expected perspective")
+    p_still.add_argument("--no-record", action="store_true", help="Do not write the <image>.gate.json record")
     p_still.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_still.set_defaults(func=cmd_judge_still)
 
@@ -683,6 +784,7 @@ def main() -> None:
     p_views.add_argument("--ground-tolerance", type=int, default=1, help="Allowed ground-row difference in px (default 1)")
     p_views.add_argument("--height-tolerance", type=int, default=2, help="Allowed drawn-height difference in px (default 2)")
     p_views.add_argument("--area-tolerance", type=float, default=0.20, help="Allowed opaque-area ratio difference (default 0.20)")
+    p_views.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_views.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_views.set_defaults(func=cmd_judge_views)
 
@@ -692,8 +794,17 @@ def main() -> None:
     p_anim.add_argument("--cell", type=int, help="Cell dimension for spritesheet (e.g. 64 or 96)")
     p_anim.add_argument("--walk", action="store_true", help="Check alternating foot walk cadence")
     p_anim.add_argument("--palette", default="luap-40", help="Target palette name or file")
+    p_anim.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_anim.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_anim.set_defaults(func=cmd_judge_anim)
+
+    # review-check (gatekeeper: refuse ungated images)
+    p_rc = subparsers.add_parser("review-check", help="Exit 1 unless every image has a current passed gate record (<image>.gate.json)")
+    p_rc.add_argument("paths", nargs="+", help="Image files, folders, or glob patterns")
+    p_rc.add_argument("--require", default="still",
+                      help="Gate name(s) that must have passed, comma-separated; any one satisfies (start_image, views, anim, still, ...)")
+    p_rc.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_rc.set_defaults(func=cmd_review_check)
 
     # repo search
     p_search = subparsers.add_parser("search", help="Search central art repository")
