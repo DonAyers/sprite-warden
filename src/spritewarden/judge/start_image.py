@@ -191,9 +191,11 @@ def check_start_image(
     else:
         record("symmetry", None, f"skipped for facing '{facing}'")
 
-    # 4. Content height vs target / tier / identity cell
+    # 4. Content height vs target / tier / identity tier / identity cell
     lo = hi = None
     source = None
+    if not target_height and not size_tier and identity is not None and getattr(identity, "size_tier", None):
+        size_tier = identity.size_tier
     if target_height:
         tol = max(2, int(round(target_height * height_tolerance)))
         lo, hi, source = target_height - tol, target_height + tol, f"target {target_height}px (+-{tol})"

@@ -386,6 +386,10 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
 
 
 def cmd_judge_anim(args: argparse.Namespace) -> int:
+    identity = _load_identity(getattr(args, "char_id", None))
+    # The identity knows how the character moves; an explicit --locomotion wins.
+    args.locomotion = args.locomotion or (identity.locomotion if identity is not None else None) or "legs"
+    args.palette = args.palette or (identity.palette_id if identity is not None else None) or "luap-40"
     card = evaluate_animation(
         frames_or_sheet=args.path,
         cell=args.cell,
@@ -401,7 +405,7 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
     targets = sorted(f for f in src.iterdir() if f.suffix.lower() == ".png") if src.is_dir() else [src]
     records = _write_records(
         targets, gates_from_scorecard(card, "anim"),
-        _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette", "source")),
+        _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette", "source", "char_id")),
         not getattr(args, "no_record", False),
     )
 
@@ -461,6 +465,88 @@ def cmd_review_check(args: argparse.Namespace) -> int:
         console.print(f" • {m['path']}: {m['reason']}{have}")
     console.print("[dim]Gate them first: warden judge-still --start-image / judge-views / judge-anim[/]")
     return 1
+
+
+def _pairs(items: list[str] | None, what: str) -> dict[str, str] | None:
+    """``key=value`` options as a dict."""
+    if not items:
+        return None
+    out: dict[str, str] = {}
+    for item in items:
+        key, eq, value = item.partition("=")
+        if not eq or not key.strip():
+            raise ValueError(f"{what} must be KEY=VALUE, got {item!r}")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def cmd_identity(args: argparse.Namespace) -> int:
+    from .repo.identity import build_identity
+
+    cat = AssetCatalog()
+    if args.identity_command == "list":
+        idents = cat.list_identities(game=args.game)
+        if args.json:
+            print(json.dumps([i.model_dump() for i in idents], indent=2))
+            return 0
+        table = Table(title="Character identities", show_header=True)
+        for col in ("ID", "Name", "Game", "Cell", "Tier", "Locomotion", "Body", "Features"):
+            table.add_column(col)
+        for i in idents:
+            table.add_row(i.id, i.name, i.game, "x".join(str(d) for d in i.dimensions), i.size_tier or "-",
+                          i.locomotion or "-", i.body_class or "-", ", ".join(i.features) or "-")
+        console.print(table)
+        return 0
+
+    if args.identity_command == "show":
+        ident = cat.get_identity(args.id)
+        if ident is None:
+            console.print(f"[bold red]Unknown identity:[/] {args.id}")
+            return 1
+        print(json.dumps(ident.model_dump(), indent=2))
+        return 0
+
+    # set: create, or update the fields given
+    try:
+        dims = None
+        if args.width or args.height:
+            existing_dims = (cat.get_identity(args.id).dimensions if cat.get_identity(args.id) else [64, 64])
+            dims = [args.width or existing_dims[0], args.height or existing_dims[1]]
+        ident = build_identity(
+            cat.get_identity(args.id),
+            args.id,
+            name=args.name,
+            prompt_description=args.desc,
+            game=args.game,
+            palette_id=args.palette,
+            perspective=args.perspective,
+            dimensions=dims,
+            ground_row_offset=args.ground_row_offset,
+            prohibitions=args.prohibit,
+            features=args.feature,
+            turnaround_stills=_pairs(args.still, "--still"),
+            style_anchors=_pairs(args.style_anchor, "--style-anchor"),
+            locomotion=args.locomotion,
+            body_class=args.body_class,
+            size_tier=args.size_tier,
+        )
+    except ValueError as exc:
+        console.print(f"[bold red]Identity not saved:[/] {escape(str(exc))}")
+        return 1
+    cat.save_identity(ident)
+    if args.json:
+        print(json.dumps(ident.model_dump(), indent=2))
+        return 0
+    console.print(f"[bold green]Identity saved:[/] {ident.id} ({ident.name}, {ident.game})")
+    console.print(f"  cell {ident.dimensions[0]}x{ident.dimensions[1]}, ground row offset {ident.ground_row_offset}, "
+                  f"tier {ident.size_tier or '-'}, locomotion {ident.locomotion or '-'}, body {ident.body_class or '-'}")
+    for f in ident.features.values():
+        console.print(f"  feature {f.name}: side {f.side or '-'}, marker {f.marker_hex or '-'}, box {f.relative_box or '-'}")
+    for facing, path in ident.turnaround_stills.items():
+        console.print(f"  still {facing}: {path}")
+    for provider, value in ident.style_anchors.items():
+        console.print(f"  style anchor {provider}: {value}")
+    return 0
 
 
 def cmd_repo_search(args: argparse.Namespace) -> int:
@@ -829,9 +915,11 @@ def main(argv: list[str] | None = None) -> None:
     p_anim.add_argument("path", help="Path to spritesheet PNG or folder of frames")
     p_anim.add_argument("--cell", type=int, help="Cell dimension for spritesheet (e.g. 64 or 96)")
     p_anim.add_argument("--walk", action="store_true", help="Check walk mechanics (cadence for legs; steady turning base for wheels/treads)")
-    p_anim.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), default="legs",
-                        help="How the character moves: legs (alternating feet), wheels or treads (ground row + hub steadiness)")
-    p_anim.add_argument("--palette", default="luap-40", help="Target palette name or file")
+    p_anim.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), default=None,
+                        help="How the character moves: legs (alternating feet), wheels or treads (ground row + hub "
+                             "steadiness). Default: the identity's locomotion (--char-id), else legs")
+    p_anim.add_argument("--char-id", help="CharacterIdentity slug: supplies locomotion and palette when not given")
+    p_anim.add_argument("--palette", default=None, help="Target palette name or file (default: the identity's, else luap-40)")
     p_anim.add_argument("--source", metavar="STILL.png",
                         help="The still the animation was made from: frame_integrity fails frames with enclosed holes "
                              "the still lacks (a keyed-out fill) or >15%% less opaque area")
@@ -846,6 +934,39 @@ def main(argv: list[str] | None = None) -> None:
                       help="Gate name(s) that must have passed, comma-separated; any one satisfies (start_image, views, anim, still, ...)")
     p_rc.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_rc.set_defaults(func=cmd_review_check)
+
+    # identity (character identities: what the judges and the router know about a character)
+    p_ident = subparsers.add_parser("identity", help="Character identities: set / show / list")
+    ident_sub = p_ident.add_subparsers(dest="identity_command", required=True)
+    p_iset = ident_sub.add_parser("set", help="Create an identity, or update the fields given on an existing one")
+    p_iset.add_argument("id", help="Unique slug, e.g. bildbot")
+    p_iset.add_argument("--name", help="Display name (default: the id)")
+    p_iset.add_argument("--desc", help="Core visual description (required when creating)")
+    p_iset.add_argument("--game", help="Game slug (default: global)")
+    p_iset.add_argument("--palette", help="Palette id (default: luap-40)")
+    p_iset.add_argument("--perspective", help="Camera perspective (default: low top-down)")
+    p_iset.add_argument("--width", type=int, help="Cell width in px")
+    p_iset.add_argument("--height", type=int, help="Cell height in px")
+    p_iset.add_argument("--ground-row-offset", type=int, help="Pixels up from the bottom cell edge where it stands")
+    p_iset.add_argument("--prohibit", action="append", metavar="TEXT", help="Forbidden trait (repeatable; replaces the list)")
+    p_iset.add_argument("--feature", action="append", metavar="NAME:SIDE:MARKER_HEX[:X,Y,W,H]",
+                        help="Landmark feature (repeatable, merged by name): side left|right|- is the character's own "
+                             "side, marker_hex the colour the judges locate, the box is on the front cell. "
+                             "e.g. wrench:left:#ff00ff:10,30,8,12")
+    p_iset.add_argument("--still", action="append", metavar="FACING=PATH", help="Approved turnaround still (repeatable), e.g. south=art/bot/south.png")
+    p_iset.add_argument("--style-anchor", action="append", metavar="PROVIDER=VALUE", help="Provider id that pins the look (repeatable), e.g. spritecook=<asset_id>")
+    p_iset.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), help="How it moves (the walk gate's mode)")
+    p_iset.add_argument("--body-class", choices=["figure", "rigid"], help="figure (head/torso/limbs) or rigid (vehicle, prop)")
+    p_iset.add_argument("--size-tier", choices=sorted(SIZE_TIERS), help="Resolution tier of the whole set")
+    p_iset.add_argument("--json", action="store_true", help="Output JSON")
+    p_iset.set_defaults(func=cmd_identity)
+    p_ishow = ident_sub.add_parser("show", help="Print one identity as JSON")
+    p_ishow.add_argument("id")
+    p_ishow.set_defaults(func=cmd_identity)
+    p_ilist = ident_sub.add_parser("list", help="List identities")
+    p_ilist.add_argument("--game", help="Filter by game")
+    p_ilist.add_argument("--json", action="store_true", help="Output JSON")
+    p_ilist.set_defaults(func=cmd_identity)
 
     # repo search
     p_search = subparsers.add_parser("search", help="Search central art repository")

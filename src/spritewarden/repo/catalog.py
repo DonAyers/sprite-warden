@@ -1,6 +1,7 @@
 """Central Asset Repository & Catalog: SQLite FTS5 search and identity storage."""
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from .identity import CharacterIdentity, SceneIdentity
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "spritewarden.db"
+DB_ENV = "SPRITEWARDEN_DB"  # path override for the catalog database
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS identities (
@@ -51,6 +53,20 @@ CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
     INSERT INTO assets_fts(rowid, name, category, asset_type, tags, game, character_id, file_path)
     VALUES (new.rowid, new.name, new.category, new.asset_type, new.tags, new.game, new.character_id, new.file_path);
 END;
+
+-- Keep the external-content FTS index in step with updates and deletes (register_asset upserts):
+-- without these a re-registered asset stayed findable by its OLD name/tags and not by the new ones.
+CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE ON assets BEGIN
+    INSERT INTO assets_fts(assets_fts, rowid, name, category, asset_type, tags, game, character_id, file_path)
+    VALUES ('delete', old.rowid, old.name, old.category, old.asset_type, old.tags, old.game, old.character_id, old.file_path);
+    INSERT INTO assets_fts(rowid, name, category, asset_type, tags, game, character_id, file_path)
+    VALUES (new.rowid, new.name, new.category, new.asset_type, new.tags, new.game, new.character_id, new.file_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
+    INSERT INTO assets_fts(assets_fts, rowid, name, category, asset_type, tags, game, character_id, file_path)
+    VALUES ('delete', old.rowid, old.name, old.category, old.asset_type, old.tags, old.game, old.character_id, old.file_path);
+END;
 """
 
 
@@ -58,7 +74,7 @@ class AssetCatalog:
     """Manages the central art database, character identities, and FTS5 search."""
 
     def __init__(self, db_path: str | Path | None = None):
-        self.db_path = Path(db_path or DEFAULT_DB_PATH)
+        self.db_path = Path(db_path or os.environ.get(DB_ENV) or DEFAULT_DB_PATH)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -69,7 +85,34 @@ class AssetCatalog:
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
+            had_update_trigger = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'assets_au'"
+            ).fetchone() is not None
+            had_assets = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assets'"
+            ).fetchone() is not None
             conn.executescript(SCHEMA)
+            if had_assets and not had_update_trigger:
+                # A database from before the update/delete triggers may hold stale index rows;
+                # an FTS 'delete' with values that do not match them would corrupt the index.
+                conn.execute("INSERT INTO assets_fts(assets_fts) VALUES ('rebuild')")
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        """One asset row by id (provenance decoded), or None."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["provenance"] = json.loads(item["provenance"]) if item.get("provenance") else {}
+        except ValueError:
+            pass
+        return item
+
+    def delete_asset(self, asset_id: str) -> bool:
+        with self._get_conn() as conn:
+            return conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,)).rowcount > 0
 
     # --- Character Identity Methods ---
 

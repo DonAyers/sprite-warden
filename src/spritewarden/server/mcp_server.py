@@ -102,19 +102,40 @@ def register_character_identity(
     width: Annotated[int, Field(description="Standard cell width")] = 64,
     height: Annotated[int, Field(description="Standard cell height")] = 64,
     prohibitions: Annotated[list[str], Field(description="Explicitly forbidden traits")] = [],
+    features: Annotated[list[dict] | None, Field(description="Landmark features: [{name, side: 'left'|'right'|null (the character's own side, for a held tool), marker_hex: '#ff00ff', relative_box: [x, y, w, h] on the front cell, description, rigid}]. Sided features with a marker_hex enable judge_direction_set's tool-side check. Merged by name into an existing identity.")] = None,
+    turnaround_stills: Annotated[dict[str, str] | None, Field(description="Approved view per facing, e.g. {'south': 'art/bot/south.png'}; the south still is the default reference for judge_still")] = None,
+    ground_row_offset: Annotated[int | None, Field(description="Pixels up from the bottom cell edge where the feet / wheel rest")] = None,
+    style_anchors: Annotated[dict | None, Field(description="Provider ids that pin the look, e.g. {'spritecook': '<asset_id>', 'pixellab_character_id': '...'}")] = None,
+    locomotion: Annotated[str | None, Field(description="legs | wheels | treads: the walk gate's mode when judge_animation gets this character_id")] = None,
+    body_class: Annotated[str | None, Field(description="figure (head/torso/limbs) | rigid (vehicle, prop)")] = None,
+    size_tier: Annotated[str | None, Field(description="Resolution tier of the set: 16-32 | 48-64 | 96 | 128 (the start-image height check when judge_still gets this character_id)")] = None,
 ) -> dict:
-    """Create or update a canonical CharacterIdentity to ensure cross-view visual consistency."""
-    ident = CharacterIdentity(
-        id=id,
-        name=name,
-        game=game,
-        palette_id=palette_id,
-        perspective=perspective,
-        dimensions=[width, height],
-        prompt_description=prompt_description,
-        prohibitions=prohibitions,
-    )
-    get_catalog().save_identity(ident)
+    """Create or update a canonical CharacterIdentity to ensure cross-view visual consistency. On an existing id the optional fields left null are kept; features, stills and style anchors merge by key."""
+    from ..repo.identity import build_identity
+
+    catalog = get_catalog()
+    try:
+        ident = build_identity(
+            catalog.get_identity(id),
+            id,
+            name=name,
+            game=game,
+            palette_id=palette_id,
+            perspective=perspective,
+            dimensions=[width, height],
+            prompt_description=prompt_description,
+            prohibitions=prohibitions or None,
+            features=features,
+            turnaround_stills=turnaround_stills,
+            ground_row_offset=ground_row_offset,
+            style_anchors=style_anchors,
+            locomotion=locomotion,
+            body_class=body_class,
+            size_tier=size_tier,
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+    catalog.save_identity(ident)
     return {"status": "ok", "identity": ident.model_dump()}
 
 
@@ -359,12 +380,15 @@ def judge_animation(
     cell_size: Annotated[int | None, Field(description="Square cell size for spritesheet, e.g. 64 or 96")] = None,
     is_walk: Annotated[bool, Field(description="Run the walk-mechanics gate (cadence for legs; steady turning base for wheels/treads)")] = False,
     palette: Annotated[str | None, Field(description="Target palette to check")] = "luap-40",
-    locomotion: Annotated[str, Field(description="legs | wheels | treads: wheels/treads skip cadence and check ground-row steadiness and hub/wheel bbox stability")] = "legs",
+    locomotion: Annotated[str | None, Field(description="legs | wheels | treads: wheels/treads skip cadence and check ground-row steadiness and the ground-contact mass's box. Null = the character identity's locomotion, else legs")] = None,
+    character_id: Annotated[str | None, Field(description="CharacterIdentity slug: supplies locomotion and the palette when they are not given")] = None,
     source_path: Annotated[str | None, Field(description="The still the animation was made from: the frame_integrity gate fails frames with enclosed transparent holes the still lacks (a keyed-out fill) or >15% less opaque area. Without it frames are only compared with each other, so a hole present in EVERY frame goes unseen.")] = None,
 ) -> dict:
     """Run frame integrity (holes / lost area vs the source still), temporal anomaly, loop smoothness, and walk mechanics checks on an animation sequence."""
     from ..gates import gates_from_scorecard, write_record
 
+    identity = get_catalog().get_identity(character_id) if character_id else None
+    locomotion = locomotion or (identity.locomotion if identity is not None else None) or "legs"
     card = evaluate_animation(
         frames_or_sheet=sheet_or_dir_path,
         cell=cell_size,
@@ -381,7 +405,7 @@ def judge_animation(
         try:
             written.append(str(write_record(t, gates_from_scorecard(card, "anim"), params={
                 "command": "judge_animation", "cell": cell_size, "is_walk": is_walk, "locomotion": locomotion, "palette": palette,
-                "source": source_path,
+                "source": source_path, "character_id": character_id,
             })))
         except Exception as exc:  # noqa: BLE001
             out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")

@@ -49,6 +49,9 @@ def canonical_facing(name: str) -> str | None:
 
 
 def _feature_side(feature: Any) -> str | None:
+    explicit = str(getattr(feature, "side", None) or "").strip().lower()
+    if explicit in ("left", "right"):
+        return explicit
     text = f"{getattr(feature, 'name', '')} {getattr(feature, 'description', '')}".lower()
     has_left = "left" in text
     has_right = "right" in text
