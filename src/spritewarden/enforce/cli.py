@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-COMMANDS = ("hook", "check-call")
+COMMANDS = ("hook", "check-call", "rules", "pipeline")
 
 
 def add_parsers(subparsers: Any) -> None:
@@ -32,6 +32,31 @@ def add_parsers(subparsers: Any) -> None:
     p_hook.add_argument("--claude", action="store_true", help="Claude Code hook protocol (the default and only one)")
     p_hook.add_argument("--project", help="Project root (default: nearest spritewarden.json / .git above the event's cwd)")
     p_hook.set_defaults(func=cmd_hook)
+
+    p_rules = subparsers.add_parser(
+        "rules", help="Print the standing pipeline rules, the stages, each provider's identity method and where "
+                      "every character is (for a session-start hook)")
+    p_rules.add_argument("--project", help="Project root (default: nearest spritewarden.json / .git above the cwd)")
+    p_rules.add_argument("--no-status", action="store_true", help="Rules only, no per-character status")
+    p_rules.set_defaults(func=cmd_rules)
+
+    p_pipe = subparsers.add_parser("pipeline", help="A character's recorded route (pipeline.json): init / set / show / check")
+    pipe_sub = p_pipe.add_subparsers(dest="pipeline_command", required=True)
+    p_init = pipe_sub.add_parser("init", help="Create pipeline.json in a character's folder")
+    p_init.add_argument("folder")
+    p_init.add_argument("values", nargs="*", metavar="key=value", help="e.g. anchor=art/bot/south.png locomotion=wheels faces.back=plain")
+    p_init.add_argument("--force", action="store_true", help="Overwrite an existing pipeline.json")
+    p_set = pipe_sub.add_parser("set", help="Set values: key=value, faces.back=..., identity.pixellab.id=...")
+    p_set.add_argument("folder")
+    p_set.add_argument("values", nargs="+", metavar="key=value")
+    p_show = pipe_sub.add_parser("show", help="Print pipeline.json and the stage it has reached")
+    p_show.add_argument("folder")
+    p_check = pipe_sub.add_parser("check", help="List what is wrong or still undecided (exit 1 on errors)")
+    p_check.add_argument("folder")
+    for p in (p_init, p_set, p_show, p_check):
+        p.add_argument("--project", help="Project root (default: found from the folder)")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(func=cmd_pipeline)
 
 
 def _root(project: str | None, cwd: str | None) -> Path:
@@ -106,8 +131,67 @@ def cmd_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _out(text: str) -> None:
+    """Print UTF-8 whatever the console code page is (a hook's stdout is a pipe on Windows)."""
+    try:
+        sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+        sys.stdout.buffer.flush()
+    except (AttributeError, ValueError):
+        print(text)
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    from .pipeline import rules_text
+
+    root = None if args.no_status else _root(args.project, None)
+    _out(rules_text(root))
+    return 0
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    from .config import find_project_root, load_config
+    from .pipeline import check_pipeline, load_pipeline, pipeline_file, save_pipeline, set_values, stage_status
+
+    path = pipeline_file(args.folder)
+    cfg = load_config(Path(args.project) if args.project else find_project_root(path.parent.resolve()))
+    command = args.pipeline_command
+    try:
+        if command == "init":
+            if path.exists() and not args.force:
+                _out(f"{path} exists (use `warden pipeline set`, or --force to start over)")
+                return 1
+            data = {"bot": path.parent.resolve().name, "anchor": None, "anchor_facing": "south",
+                    "faces": {"back": "", "left": "", "right": ""}, "rotation_provider": None,
+                    "animation_provider": None, "identity": {}, "props": "layers"}
+            save_pipeline(path, set_values(data, list(args.values)))
+        elif command == "set":
+            data = load_pipeline(path) if path.exists() else {}
+            save_pipeline(path, set_values(data, list(args.values)))
+        else:
+            data = load_pipeline(path)
+    except (OSError, ValueError) as exc:
+        _out(f"pipeline error: {exc}")
+        return 1
+    problems = check_pipeline(data, cfg, path)
+    status = stage_status(data, cfg)
+    errors = [p for p in problems if p["level"] == "error"]
+    if args.json:
+        _out(json.dumps({"path": str(path), "pipeline": data, "status": status, "problems": problems}, indent=2))
+        return 1 if (command == "check" and errors) else 0
+    if command in ("init", "set"):
+        _out(f"wrote {cfg.relative(path)}")
+    if command == "show":
+        _out(json.dumps(data, indent=2, ensure_ascii=False))
+    _out(f"next: {status['next']}")
+    for p in problems:
+        _out(f"  {p['level'].upper():5} [{p['stage']}] {p['text']}")
+    if not problems:
+        _out("  nothing missing")
+    return 1 if (command == "check" and errors) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="warden", description="sprite-warden enforcement (check-call, hook)")
+    parser = argparse.ArgumentParser(prog="warden", description="sprite-warden enforcement (check-call, hook, rules, pipeline)")
     add_parsers(parser.add_subparsers(dest="command", required=True))
     args = parser.parse_args(argv)
     return int(args.func(args))

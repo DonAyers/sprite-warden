@@ -121,8 +121,14 @@ def test_the_other_verdict_rules():
     gate = reference_gate(parse_reference_response(missing, facing="south_east"), facing="south_east")
     assert gate.passed is False and "missing: left arm" in gate.errors[0] and "should be visible from south_east" in gate.errors[0]
 
+    # a bare "not the same character" with nothing concrete named is a verdict, not evidence: a warning
     other = {**OCCLUSION_ONLY, "same_character": False}
-    assert reference_gate(parse_reference_response(other)).passed is False
+    bare = reference_gate(parse_reference_response(other))
+    assert bare.passed is True and any(w.startswith("identity:") for w in bare.warnings)
+    # ... with a concrete difference beside it, it fails as before
+    named = {**other, "changed_parts": [{"part": "body", "detail": "blue instead of grey"}]}
+    gate = reference_gate(parse_reference_response(named))
+    assert gate.passed is False and any(e.startswith("identity:") for e in gate.errors)
 
     # elevation: 15 degrees apart is tolerated, more is not
     assert reference_gate(parse_reference_response({**OCCLUSION_ONLY, "candidate_elevation": 40})).passed is True

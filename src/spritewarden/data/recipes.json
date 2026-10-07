@@ -5,9 +5,37 @@
     "start_image", "direction_set", "pixel_grid", "palette_adherence", "clipping", "symmetry",
     "loop_smoothness", "animation_anomalies", "walk_mechanics", "vision_reference"
   ],
+  "pipeline_rules": [
+    "One anchor: every view and motion of a character derives from ONE gated south image, recorded in its pipeline.json.",
+    "One provider per stage: the provider that turns the set is recorded once (rotation_provider) and nothing else turns it; the same for animation. Never patch one provider's set with another's output.",
+    "The provider's own character identity first: where a provider keeps a character as an entity (PixelLab character_id, SpriteCook base character asset), create it the way that provider prescribes and do every later step THROUGH that id.",
+    "Decide the unseen faces before turning: pipeline.json describes the back, left and right of the design (\"plain\" is a design). A rotation tool fills an undescribed face with invented detail.",
+    "Props are layers: held tools, wheels and racks are generated or drawn separately at each angle, never baked into the body that gets turned.",
+    "Fix the still, not the prompt: a wrong view or motion means a wrong input image; rewording the prompt repeats the result.",
+    "Nothing un-gated moves on, and nothing un-gated is shown: `warden stage anchor|views|anim` runs the checks for a stage (pixels, palette, set consistency, vision against the anchor, frames against the still) and stops at the first failure.",
+    "Judge at game scale and in the game: review images are whole-pixel multiples of the game's scale; the final approval is a screenshot from the running game.",
+    "Every rejection is recorded (failed gates automatically, a person's \"no\" with `warden reject`); read `warden rejections` before generating again."
+  ],
+  "stages": [
+    {"stage": "0 design", "what": "front-view candidates, the owner's pick", "command": "", "gate": "the pick"},
+    {"stage": "1 anchor", "what": "the picked south image, cleaned to the rotation tool's start-image rules", "command": "warden stage anchor <image>", "gate": "start_image"},
+    {"stage": "2 views", "what": "the 4 or 8 facings by the ONE recorded rotation provider", "command": "warden stage views <folder>", "gate": "direction_set + vision_reference vs the anchor"},
+    {"stage": "3 props", "what": "tools / wheels / racks as layers per angle", "command": "warden stage views <folder> (per layer)", "gate": "direction_set"},
+    {"stage": "4 motion", "what": "walks, idles, actions by the ONE recorded animation provider, through its character id", "command": "warden stage anim <sheet> --source <still>", "gate": "frame_integrity + loop + anomalies (+ walk)"},
+    {"stage": "5 in game", "what": "the sheet in the running game, beside an existing character", "command": "(project tool: in-game screenshots)", "gate": "the owner's approval"}
+  ],
   "providers": {
     "pixellab": {
       "aliases": ["pixel_lab", "pl"],
+      "identity": {
+        "entity": true,
+        "concept": "a managed Character (character_id). `create_character` builds the 8-direction character from one dead-south reference passed by URL; every later step goes through that id: `create_character_state` for a new pose (the mid-stride start of a walk), `animate_character` (templates) or `animate_with_skeleton_v3` (recommended for character work) for motion, `style_character_id` to carry its look and palette to another character. Rigid props use the object twin (`create_8_direction_object` -> object_id).",
+        "create_with": ["create_character", "create_8_direction_object"],
+        "id_args": ["character_id", "object_id"],
+        "reuse": {"poses": "create_character_state(character_id)", "motion": "animate_character / animate_with_skeleton_v3 (character_id)", "style": "style_character_id, color_image"},
+        "dont": ["Do not animate a loose image of a character PixelLab already holds: use its character_id.", "Do not push a non-humanoid through the mannequin path or a character through the object path."],
+        "sources": ["https://pixellab.ai/docs", "https://api.pixellab.ai/mcp/docs"]
+      },
       "enforce": {"mcp_prefixes": ["mcp__pixellab__"], "read_only": ["^get_", "^list_", "^wait_for_jobs$", "^search_", "^agent_(help|list|inspect|feedback)$", "^chat_(get|list)_", "^view_map$", "^sandbox_", "^delete_", "^cancel_job$", "^(add_to|remove_from)_project$", "^pixelart_workbench$", "^dismiss_review$", "^update_\\w+_tags$", "^select_object_frames$"], "rules": [{"kind": "forbid_inline_image_args", "args": ["reference_image_base64", "custom_start_frame_base64", "end_frame_base64"], "message": "inline base64 references are truncated by MCP clients above ~32px: pass the URL field instead (PixelLab MCP guide)."}, {"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}], "source": [{"kind": "url", "args": ["reference_image_url", "custom_start_frame_url", "end_frame_url"]}]},
       "defaults": {
         "forbidden_words": [
@@ -227,6 +255,14 @@
     },
     "spritefusion": {
       "aliases": ["sprite_fusion", "sf"],
+      "identity": {
+        "entity": false,
+        "concept": "no character entity: the finished sprite IS the identity. Keep it by chaining `edit` from the same primary image (one change per request, up to 9 supporting images), by `direction-set` on the finished sprite (no prompt: the image carries the design), and by `style-reference` with 4-8 of your own sprites for new related art.",
+        "id_args": [],
+        "reuse": {"poses": "edit (primary image first)", "directions": "direction-set (no prompt)", "style": "style-reference with 4-8 sprites"},
+        "dont": ["Do not describe the character again in an edit prompt: describe only the change and what must stay."],
+        "sources": ["https://www.spritefusion.com/docs/pixel-art-generator/api/api-reference"]
+      },
       "enforce": {"cli": {"spending_ops": ["generate", "edit", "animate", "direction-set", "style-reference"]}, "rules": [{"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}, {"kind": "no_dimensions_in_prompt", "args": ["prompt"], "message": "no pixel dimensions in a Sprite Fusion prompt; size goes in the size field."}]},
       "defaults": {
         "forbidden_words": [
@@ -351,6 +387,14 @@
     },
     "retrodiffusion": {
       "aliases": ["retro_diffusion", "rd"],
+      "identity": {
+        "entity": false,
+        "concept": "no character entity: identity comes from the image you pass. Advanced animations (rotate, walking, idle, attack) take the character as `input_image` and the prompt describes MOTION only; RD Pro stills take up to 9 `reference_images` (\"generate the character once, then pass that output back as a reference\"); a `user__` style built from one reference (POST /v2/styles) pins a look across calls.",
+        "id_args": [],
+        "reuse": {"directions": "rd_advanced_animation__rotate (input_image)", "motion": "rd_advanced_animation__walking|idle|attack (input_image = a cardinal view)", "style": "reference_images, user__ style"},
+        "dont": ["Do not describe the character in an advanced-animation prompt.", "Do not use the prompt-driven rd_animation__8_dir_rotation for an existing sprite: it invents the design."],
+        "sources": ["https://github.com/Retro-Diffusion/api-examples"]
+      },
       "enforce": {"cli": {"spending_ops": ["generate"], "operation_from": [{"arg": "style"}, {"arg": "style", "prefix": "rd_pro__", "operation": "rd_pro"}, {"arg": "style", "prefix": "rd_advanced_animation__", "strip_prefix": true}]}, "rules": [{"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}]},
       "defaults": {
         "forbidden_words": ["\\btransparent\\s+background\\b", "\\bpixel\\s+art\\b", "\\bpixel[\\s-]?perfect\\b"],
@@ -474,6 +518,15 @@
     },
     "spritecook": {
       "aliases": ["sprite_cook", "sc"],
+      "identity": {
+        "entity": true,
+        "concept": "a base character asset (character_id = its asset_id). `generate_character` with the game's perspective makes it once (perspective is baked in: \"the animation won't rotate the view for you\"); `generate_character_animations(character_id, same perspective)` makes the motions and the other facings through its own prep poses (top-down: idle / idle_back / idle_right / idle_left, walk_up / down / right / left, attack, hurt, death and their _back / _right / _left forms); a custom motion is `animate_game_art(asset_id = that same asset)` or a `custom_animations` entry with a `source_view`. Changes are `edit_asset_id` on it; new related art takes it in `style_asset_ids`. Save every id in the manifest.",
+        "create_with": ["generate_character"],
+        "id_args": ["character_id", "asset_id"],
+        "reuse": {"directions": "generate_character_animations presets (prep poses turn the character: back_idle, right_idle, left_idle)", "motion": "generate_character_animations, animate_game_art(asset_id)", "edits": "edit_asset_id", "style": "style_asset_ids (up to 10)"},
+        "dont": ["Do not generate a new still per motion: animate the exact base asset.", "Do not turn a character with a hand-written edit prompt when a preset's prep pose does it.", "There is no rotation tool: 8 directions are not a SpriteCook deliverable (4 via presets)."],
+        "sources": ["https://spritecook.ai/blog/character-creator-flow", "https://spritecook.ai/blog/custom-character-animations"]
+      },
       "enforce": {"mcp_prefixes": ["mcp__plugin_spritecook_spritecook__", "mcp__spritecook__"], "spends": ["^generate_", "^animate_", "^remove_background$", "^create_ui_kit$", "^generate_ui_kit", "^extract_ui_kit"], "operation_overrides": [{"tool": "generate_game_art", "arg_present": "edit_asset_id", "operation": "edit"}], "rules": [{"kind": "max_items", "arg": "colors", "max": 8, "message": "`colors` has {count} entries; SpriteCook's API takes at most {max} and treats them as guidance -- drop it and remap afterwards."}, {"kind": "forbidden_words", "args": ["prompt", "description", "action_description"]}]},
       "defaults": {
         "forbidden_words": [
@@ -508,7 +561,7 @@
           "start_image": null,
           "prompt_rules": ["Match your perspective early: changing perspective after the fact is much harder; the animation won't rotate the view for you.", "Generate the base character once, then animate that exact asset_id."],
           "forbidden_words": [],
-          "arg_limits": {"size_default": 64, "perspectives": ["topdown", "sidescroller", "isometric"], "colors_max": 8},
+          "arg_limits": {"size_default": 64, "perspectives": ["topdown", "platformer", "isometric"], "colors_max": 8},
           "required_gates_before": [],
           "required_gates_after": ["start_image", "pixel_grid", "palette_adherence"],
           "asset_id_params": ["asset_id"],
@@ -525,7 +578,7 @@
           },
           "prompt_rules": ["Keep 'Enhance prompt' ON and prompts short.", "Engine v1.1 for anything that must LOOP (walks, idles; even frames); v1.5 for a one-angle action (steadier, stiffer, no negative prompt).", "Margins LOW: 0-5% idle, 5-10% attack, 10-15% jump."],
           "forbidden_words": [],
-          "arg_limits": {"source_max_px": 256, "source_recommended_px": 64, "frames_default": 8, "frames_even_for_loops": true, "presets_topdown": ["idle", "idle_back", "idle_right", "walk_up", "walk_down", "walk_right", "attack", "hurt", "death"], "walk_left": "mirror in-engine"},
+          "arg_limits": {"source_max_px": 256, "source_recommended_px": 64, "frames_default": 8, "frames_even_for_loops": true, "presets_topdown": ["idle", "idle_back", "idle_right", "idle_left", "walk_up", "walk_down", "walk_right", "walk_left", "run_up", "run_down", "run_right", "run_left", "attack", "attack_back", "attack_right", "attack_left", "hurt", "hurt_back", "hurt_right", "hurt_left", "death", "death_back", "death_right", "death_left"], "presets_note": "list_character_workflows is the live list (checked 2026-10-07); back/right/left presets pay a 12-credit prep pose that turns the character", "source_views": ["front_idle", "back_idle", "right_idle", "left_idle", "front_walk", "back_walk", "right_walk", "left_walk"]},
           "enforce": {"stage": "animation", "source": [{"kind": "manifest_asset", "args": ["character_id", "asset_id"]}], "rules": [{"kind": "matte_collision", "matte_arg": null, "default": "#808080", "max_fraction": 0.02, "distance": 24, "advice": "generate_character_animations has no matte parameter: use animate_game_art with an explicit matte_color absent from the sprite (e.g. \"#FF00FF\") instead."}]},
           "required_gates_before": ["start_image"],
           "required_gates_after": ["loop_smoothness", "animation_anomalies", "palette_adherence"],
@@ -571,6 +624,14 @@
     },
     "openrouter_image": {
       "aliases": ["openrouter", "nano_banana", "image_model"],
+      "identity": {
+        "entity": false,
+        "concept": "no character entity: every call carries the approved anchor as a reference image plus the same PRESERVE LIST (face, proportions, outline weight, shading; camera, scale, cell size, foot baseline). One view per call, chaining anchor + previous view; snap and remap the whole set together afterwards.",
+        "id_args": [],
+        "reuse": {"directions": "per-view edits: 'change only the facing, keep everything else'", "style": "reference images (Nano Banana 2: up to 4 character references)"},
+        "dont": ["Do not ask for a whole direction or frame sheet in one text call."],
+        "sources": ["https://openrouter.ai/models"]
+      },
       "defaults": {
         "forbidden_words": ["\\btransparent\\s+background\\b", "\\btransparent\\b", "\\bpixel[\\s-]?perfect\\b"],
         "prompt_rules": [

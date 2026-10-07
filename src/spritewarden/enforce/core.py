@@ -34,6 +34,8 @@ from typing import Any, Callable
 
 from .config import ProjectConfig, load_config
 
+__all__ = ["check_call", "Verdict", "find_pipeline", "pipeline_reasons", "faces_declared", "pipeline_identity"]
+
 RULE_KINDS = (
     "max_items",
     "forbid_args",
@@ -49,6 +51,8 @@ RULE_KINDS = (
 UMBRELLA_GATES = ("still", "start_image", "views", "anim")
 GATE_ALIASES = {"direction_set": "views", "views": "direction_set"}
 VIEW_GATES = ("views", "direction_set")
+STAGE_EXTRA_GATES = {"animation": VIEW_GATES}
+UNSEEN_FACES = ("back", "left", "right")
 REVIEW_GATES = ("still", "start_image", "views", "anim")
 PROMPT_ARGS = ("prompt", "description", "action_description")
 PROVIDER_LABELS = {
@@ -212,28 +216,38 @@ def _segment(tokens: list[str], start: int) -> list[str]:
     return out
 
 
-def _classify_command(command: str, cfg: ProjectConfig, get_reg: Callable[[], dict[str, Any]]) -> _Call | None:
+def _classify_command(command: str, cfg: ProjectConfig, get_reg: Callable[[], dict[str, Any]]) -> list[_Call]:
+    """EVERY generator call in a shell command line, in order.
+
+    A chain is checked link by link: a read-only first call (``... credits && ... edit``) must not
+    hide a spending one behind it, and two spending calls are both held to their recipes.
+    """
     tokens = _tokens(command)
-    if not tokens:
-        return None
+    calls: list[_Call] = []
     for i, tok in enumerate(tokens):
         norm = tok.replace("\\", "/")
         base = norm.rsplit("/", 1)[-1].lower()
         if base.endswith(".exe"):
             base = base[:-4]
         # a project CLI listed in the config: python tools/sprite_fusion.py <op> ...
+        matched = False
         for script, provider in cfg.cli_tools.items():
             if norm == script or norm.endswith("/" + script):
-                rest = _segment(tokens, i + 1)
-                return _cli_call(provider, rest, get_reg())
+                call = _cli_call(provider, _segment(tokens, i + 1), get_reg())
+                if call is not None:
+                    calls.append(call)
+                matched = True
+                break
+        if matched:
+            continue
         # warden generate / python -m spritewarden.cli generate
         is_warden = base in WARDEN_COMMANDS and (i == 0 or _is_separator(tokens[i - 1]) or "/" in norm)
         is_module = tok in WARDEN_MODULES and i > 0 and tokens[i - 1] == "-m"
         if is_warden or is_module:
             rest = _segment(tokens, i + 1)
             if rest and rest[0] == "generate":
-                return _warden_call(rest[1:], get_reg())
-    return None
+                calls.append(_warden_call(rest[1:], get_reg()))
+    return calls
 
 
 def _cli_call(provider: str, rest: list[str], reg: dict[str, Any]) -> _Call | None:
@@ -427,10 +441,19 @@ def _resolve_sources(call: _Call, cfg: ProjectConfig) -> tuple[list[_Source], li
 
 # ----------------------------------------------------------------------------- gates + pipeline
 
-def accepted_gates(required: list[str] | tuple[str, ...] | None) -> list[str]:
-    """The recipe's listed gates (with their aliases) plus the umbrella names, in a stable order."""
+def accepted_gates(required: list[str] | tuple[str, ...] | None, stage: str | None = None) -> list[str]:
+    """The gate names that unlock a call, in a stable order.
+
+    Exactly what the recipe lists (with aliases): a rotation needs ``start_image``, and a plain
+    ``still`` or an ``anim`` pass does NOT stand in for it (a still that merely has clean pixels is
+    not thereby fit to be an anchor). An animation may also start from a gated view of the set
+    (``views`` / ``direction_set``). Only a call whose recipe lists nothing accepts any umbrella.
+    """
+    wanted = list(required or []) + list(STAGE_EXTRA_GATES.get(stage or "", ()))
+    if not wanted:
+        wanted = list(UMBRELLA_GATES)
     out: list[str] = []
-    for g in list(required or []) + list(UMBRELLA_GATES):
+    for g in wanted:
         for name in (g, GATE_ALIASES.get(g)):
             if name and name not in out:
                 out.append(name)
@@ -446,8 +469,8 @@ def gate_reasons(path: str | Path, needed: list[str] | tuple[str, ...], cfg: Pro
     if not path.is_file():
         return [f"source image not found locally: {rel}"]
     record = load_record(path)
-    how = (f"Run `warden judge-still --start-image` (or judge-views / judge-anim) on it first: nothing derives "
-           f"from an un-gated anchor.")
+    how = (f"Run `warden stage anchor {rel}` (or `warden stage views <dir>` for a turned view) first: nothing "
+           f"derives from an un-gated image.")
     if record is None:
         return [f"{rel} has no gate record (<image>{RECORD_SUFFIX}). {how}"]
     try:
@@ -456,6 +479,12 @@ def gate_reasons(path: str | Path, needed: list[str] | tuple[str, ...], cfg: Pro
         current = False
     if not current:
         return [f"{rel} changed since it was gated (sha256 mismatch with its {RECORD_SUFFIX}). {how}"]
+    rejected = record.get("rejected")
+    if rejected:
+        who = rejected.get("by", "someone") if isinstance(rejected, dict) else "someone"
+        why = rejected.get("reason", "") if isinstance(rejected, dict) else ""
+        return [f"{rel} was rejected by {who} ({why}): nothing derives from a rejected image. Fix the image "
+                f"(a changed file is a new candidate) and gate it again."]
     passed = passed_gates(path)
     if not any(g in passed for g in needed):
         have = f" (passed: {', '.join(sorted(passed))})" if passed else " (nothing passed)"
@@ -512,21 +541,115 @@ def find_pipeline(path: Path, max_levels: int = 8) -> tuple[dict[str, Any] | Non
     return None, None
 
 
-def pipeline_reasons(path: Path, provider: str, stage: str | None, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]:
+def pipeline_identity(pipeline: dict[str, Any], provider: str, reg: dict[str, Any]) -> dict[str, Any] | None:
+    """The pipeline's ``identity`` entry for a provider (keys may be aliases), or None."""
+    block = pipeline.get("identity")
+    if not isinstance(block, dict):
+        return None
+    mine = _canonical_provider(reg, provider) or _norm(provider)
+    for key, value in block.items():
+        if (_canonical_provider(reg, key) or _norm(key)) == mine and isinstance(value, dict):
+            return value
+    return None
+
+
+def faces_declared(pipeline: dict[str, Any]) -> list[str]:
+    """The unseen faces (back / left / right) a pipeline does NOT describe yet."""
+    faces = pipeline.get("faces")
+    if not isinstance(faces, dict):
+        return list(UNSEEN_FACES)
+    return [f for f in UNSEEN_FACES if not str(faces.get(f) or "").strip()]
+
+
+def pipeline_reasons(
+    path: Path,
+    provider: str,
+    stage: str | None,
+    cfg: ProjectConfig,
+    reg: dict[str, Any],
+    *,
+    call_args: dict[str, Any] | None = None,
+    source_kind: str = "file",
+) -> list[str]:
+    """What the bot's ``pipeline.json`` (the recorded route) says against this call.
+
+    Always enforced when the file records it: the stage's provider, the ONE anchor a rotation
+    starts from, and the provider's own character id an animation must go through. With
+    ``require_pipeline`` (spritewarden.json) the record itself is mandatory: no pipeline.json,
+    no stage provider, no anchor, undescribed unseen faces or a missing provider character id
+    each deny the call.
+    """
     if not stage:
         return []
+    strict = cfg.require_pipeline
     pipeline, where = find_pipeline(path)
-    if not pipeline or where is None:
+    rel = cfg.relative(path)
+    if where is None:
+        if strict:
+            return [f"no pipeline.json above {rel}: record the route before spending on a {stage} "
+                    f"(`warden pipeline init <bot folder> --anchor <gated south image>`), so the provider, the "
+                    f"anchor and the design of the unseen faces are decided once and not from memory."]
         return []
-    chosen = pipeline.get(f"{stage}_provider")
-    if not chosen:
-        return []
+    where_rel = cfg.relative(where)
+    if pipeline is None:
+        return [f"{where_rel} is not a JSON object: fix it (`warden pipeline check {cfg.relative(where.parent)}`)."]
+    reasons: list[str] = []
     mine = _canonical_provider(reg, provider) or _norm(provider)
-    theirs = _canonical_provider(reg, chosen) or _norm(chosen)
-    if mine == theirs:
-        return []
-    return [f"{cfg.relative(where)} says {stage} is done by {chosen}, not {provider}: never mix providers inside "
-            f"one set. Change pipeline.json deliberately if the route changed."]
+    chosen = pipeline.get(f"{stage}_provider")
+    if chosen:
+        theirs = _canonical_provider(reg, chosen) or _norm(chosen)
+        if mine != theirs:
+            return [f"{where_rel} says {stage} is done by {chosen}, not {provider}: never mix providers inside "
+                    f"one set. Change pipeline.json deliberately if the route changed."]
+    elif strict:
+        reasons.append(f"{where_rel} records no {stage}_provider: decide which ONE provider does the {stage} for "
+                       f"this set and record it (`warden pipeline set {cfg.relative(where.parent)} "
+                       f"{stage}_provider=<provider>`) before spending.")
+
+    if stage == "rotation":
+        anchor = pipeline.get("anchor")
+        if isinstance(anchor, str) and anchor.strip():
+            if source_kind == "file":
+                try:
+                    same = cfg.resolve(anchor).resolve() == Path(path).resolve()
+                except OSError:
+                    same = False
+                if not same:
+                    reasons.append(f"{where_rel} names {anchor} as the anchor, but this rotation starts from {rel}: "
+                                   f"one anchor per set. Rotate the anchor, or change pipeline.json deliberately.")
+        elif strict:
+            reasons.append(f"{where_rel} records no anchor: gate the south image (`warden stage anchor <image>`) and "
+                           f"record it (`warden pipeline set {cfg.relative(where.parent)} anchor=<image>`).")
+        missing = faces_declared(pipeline)
+        if strict and missing:
+            reasons.append(f"{where_rel} does not describe the {', '.join(missing)} face(s) of the design (\"faces\": "
+                           f"{{\"back\": ..., \"left\": ..., \"right\": ...}}; \"plain\" is a valid design): a rotation "
+                           f"tool fills every blank face with invented detail, so decide what is there first. The "
+                           f"description is also what the vision gate checks the turned views against.")
+
+    ident = ((reg.get("providers") or {}).get(mine) or {}).get("identity") or {}
+    if stage == "animation" and ident.get("entity"):
+        declared = pipeline_identity(pipeline, mine, reg)
+        id_args = [a for a in ident.get("id_args", []) if isinstance(a, str)]
+        label = PROVIDER_LABELS.get(mine, mine)
+        if not declared or not str(declared.get("id") or "").strip():
+            if strict:
+                made_by = " / ".join(ident.get("create_with", [])) or "its character tool"
+                reasons.append(f"{where_rel} records no {label} character id (\"identity\": {{\"{mine}\": {{\"id\": "
+                               f"...}}}}): {label} keeps a character as its own entity, made by {made_by} and "
+                               f"animated through that id (`warden recipes {mine}` has its method). Create it the "
+                               f"way {label} prescribes and record the id before animating.")
+        else:
+            known = {str(declared["id"]), *[str(v) for v in declared.get("also", []) if v]}
+            given = [v for a in id_args for v in _values((call_args or {}).get(a))]
+            if not given:
+                reasons.append(f"this {label} animation names none of {' / '.join(id_args)}: animate THROUGH the "
+                               f"character {label} already holds ({declared['id']}), not from a loose image.")
+            elif not any(g in known for g in given):
+                reasons.append(f"{where_rel} says this set's {label} character is {declared['id']}; the call uses "
+                               f"{', '.join(given)}. Animate the recorded character (add a derived asset to "
+                               f"\"also\" deliberately if it is one).")
+    return reasons
 
 
 # ----------------------------------------------------------------------------- rules
@@ -709,15 +832,19 @@ def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]
             raise ValueError(f"unknown enforce rule kind {rule.get('kind')!r} in the registry")
         reasons += fn(rule, call, sources, cfg, reg)
     reasons += source_reasons
-    needed = accepted_gates((call.entry or {}).get("required_gates_before"))
     stage = _enforce(call.entry).get("stage")
+    needed = accepted_gates((call.entry or {}).get("required_gates_before"), stage)
     for source in sources:
         if source.kind == "views_dir":
             reasons += _views_dir_reasons(source.path, cfg)
         else:
             reasons += gate_reasons(source.path, needed, cfg)
         if source.path.exists():
-            reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg)
+            reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg,
+                                        call_args=call.args, source_kind=source.kind)
+    if call.via == "warden" and _present(call.args.get("force_ungated")):
+        reasons.append("`--force-ungated` skips the gates: it needs the override file (a reason on record), "
+                       "not just a flag.")
     return list(dict.fromkeys(reasons))
 
 
@@ -760,21 +887,22 @@ def recipe_gate_reasons(
             if path not in known:
                 known.add(path)
                 sources.append(_Source(path, "file", f"{key}={value}"))
-    needed = accepted_gates(entry.get("required_gates_before"))
+    stage = _enforce(entry).get("stage")
+    needed = accepted_gates(entry.get("required_gates_before"), stage)
     if not sources and not reasons:
         return [
             f"{call.provider}/{call.operation} requires a gated input image ({' / '.join(entry['required_gates_before'])}) "
             f"but the recipe names none: pass params.input_image (a local file with a passed gate record) or a "
             f"registered asset / character id."
         ]
-    stage = _enforce(entry).get("stage")
     for source in sources:
         if source.kind == "views_dir":
             reasons += _views_dir_reasons(source.path, cfg)
         else:
             reasons += gate_reasons(source.path, needed, cfg)
         if source.path.exists():
-            reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg)
+            reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg,
+                                        call_args=args, source_kind=source.kind)
     return list(dict.fromkeys(reasons))
 
 
@@ -835,10 +963,32 @@ def _recipe_context(call: _Call) -> str:
         lines.append(f"Gates before: {', '.join(before) or '-'}; gates after: {', '.join(after) or '-'}.")
     if not call.entry:
         lines.append(f"(no recipe entry for {call.provider}/{call.operation}: `warden recipes {call.provider}` lists the known operations.)")
+    ident = call.prov.get("identity") or {}
+    if ident.get("concept"):
+        lines.append(f"Character identity, {PROVIDER_LABELS.get(call.provider, call.provider)}'s way: {ident['concept']}")
     text = "\n".join(lines)
     if len(text) > CONTEXT_LIMIT:
         text = text[:CONTEXT_LIMIT].rstrip() + f"\n...(truncated; `warden recipes {call.provider} {call.operation}`)"
     return text
+
+
+def _rejection_context(calls: list[_Call], cfg: ProjectConfig) -> str:
+    """What was already rejected for this provider (gate failures and the owner's own "no"), newest first."""
+    try:
+        from ..gates.rejections import recent_rejections
+
+        lines: list[str] = []
+        for provider in dict.fromkeys(c.provider for c in calls):
+            for entry in recent_rejections(cfg.rejections_path, provider=provider, limit=4):
+                what = entry.get("reason") or "; ".join(
+                    f"{g.get('name')}: {(g.get('errors') or [''])[0]}" for g in entry.get("failed", [])[:2])
+                lines.append(f"- [{entry.get('by', 'gate')}] {entry.get('image', '?')}: {str(what)[:220]}")
+        if not lines:
+            return ""
+        return ("Already rejected for this provider (do not make the same thing again; fix the input instead):\n"
+                + "\n".join(lines[:6]))
+    except Exception:  # noqa: BLE001 - context is a convenience
+        return ""
 
 
 def _finish(provider: str, operation: str, reasons: list[str], cfg: ProjectConfig, context: str) -> Verdict:
@@ -875,21 +1025,35 @@ def _review(tool_input: dict[str, Any], cfg: ProjectConfig, state: dict[str, Any
     state["provider"], state["operation"] = "review", "publish"
     if cfg.error:
         raise ValueError(cfg.error)
+    from ..gates.records import review_problem
+
     missing: list[str] = []
+    incomplete: list[str] = []
     for group in spec["groups"]:
         for item in (group or {}).get("items", []) or []:
             for p in (item or {}).get("paths", []) or []:
                 candidates = [cfg.resolve(str(p)), spec_path.parent / str(p)]
                 full = next((c for c in candidates if c.is_file()), candidates[0])
-                if not any(g in passed_gates(full) for g in REVIEW_GATES) and str(p) not in missing:
-                    missing.append(str(p))
+                if not any(g in passed_gates(full) for g in REVIEW_GATES):
+                    if str(p) not in missing:
+                        missing.append(str(p))
+                    continue
+                problem = review_problem(full)
+                if problem and not any(entry.startswith(str(p) + ":") for entry in incomplete):
+                    incomplete.append(f"{p}: {problem}")
     reasons = []
     if missing:
         shown = ", ".join(missing[:20]) + (f" (+{len(missing) - 20} more)" if len(missing) > 20 else "")
         reasons.append(
             f"{len(missing)} review page candidate(s) without a current passed gate record "
-            f"({' / '.join(REVIEW_GATES)}): {shown}. Gate them (warden judge-still / judge-views / judge-anim) "
+            f"({' / '.join(REVIEW_GATES)}): {shown}. Gate them (warden stage anchor / views / anim) "
             f"before anyone sees them.")
+    if incomplete:
+        shown = "; ".join(incomplete[:12]) + (f" (+{len(incomplete) - 12} more)" if len(incomplete) > 12 else "")
+        reasons.append(
+            f"{len(incomplete)} review page candidate(s) passed the pixel checks but not the look check: {shown}. "
+            f"Turned views must be compared with the anchor by vision and animations with their source still "
+            f"(`warden stage views` / `warden stage anim` do both) before anyone sees them.")
     return _finish("review", "publish", reasons, cfg, "")
 
 
@@ -902,9 +1066,15 @@ def check_call(
     *,
     registry: dict[str, Any] | None = None,
 ) -> Verdict:
-    """Decide one tool call. Never raises: an internal error on a spending call is an ``allow`` whose
-    context starts with ``gatekeeper error:`` (fail open, loudly)."""
+    """Decide one tool call. Never raises.
+
+    An internal error on a spending call is a ``deny`` whose reason starts with ``gatekeeper
+    error:`` (fail closed: a rule that silently stops being checked is how the same mistake
+    gets made twice). The override file still lets a call through on purpose. A call that is
+    not a generator call stays ``ignore`` whatever goes wrong.
+    """
     state: dict[str, Any] = {"spending": False, "provider": None, "operation": None}
+    cfg: ProjectConfig | None = None
     try:
         name = str(tool_name or "")
         args = tool_input if isinstance(tool_input, dict) else {}
@@ -918,18 +1088,37 @@ def check_call(
             return registry if registry is not None else load_raw_registry()
 
         if name in ("Bash", "PowerShell"):
-            call = _classify_command(str(args.get("command") or ""), cfg, get_reg)
+            calls = _classify_command(str(args.get("command") or ""), cfg, get_reg)
         else:
-            call = _classify_mcp(name, args, get_reg())
-        if call is None:
+            one = _classify_mcp(name, args, get_reg())
+            calls = [one] if one is not None else []
+        if not calls:
             return Verdict("ignore")
-        state.update(spending=True, provider=call.provider, operation=call.operation)
+        first = calls[0]
+        state.update(spending=True, provider=first.provider, operation=first.operation)
         if cfg.error:
             raise ValueError(cfg.error)
-        reasons = _evaluate(call, cfg, get_reg())
-        return _finish(call.provider, call.operation, reasons, cfg, _recipe_context(call))
+        reasons: list[str] = []
+        blamed: _Call | None = None
+        for call in calls:
+            own = _evaluate(call, cfg, get_reg())
+            if own and blamed is None:
+                blamed = call
+            tag = f"[{call.provider} / {call.operation}] " if len(calls) > 1 else ""
+            reasons += [tag + r for r in own]
+        shown = blamed or first
+        context = "\n\n".join(_recipe_context(c) for c in calls)
+        if not reasons:
+            context = "\n\n".join(t for t in (context, _rejection_context(calls, cfg)) if t)
+        return _finish(shown.provider, shown.operation, list(dict.fromkeys(reasons)), cfg, context)
     except Exception as exc:  # noqa: BLE001 - the gatekeeper must never break the caller
         if not state["spending"]:
             return Verdict("ignore")
-        return Verdict("allow", state["provider"], state["operation"], [],
-                       f"gatekeeper error: {type(exc).__name__}: {exc}")
+        reason = (f"gatekeeper error: {type(exc).__name__}: {exc}. The call was NOT checked against the recipes "
+                  f"or the gate records, so it is refused: fix the gatekeeper (a malformed spritewarden.json, "
+                  f"registry or image), do not work around it.")
+        try:
+            return _finish(state["provider"], state["operation"], [reason],
+                           cfg if cfg is not None else ProjectConfig(root=Path(project_root)), "")
+        except Exception:  # noqa: BLE001
+            return Verdict("deny", state["provider"], state["operation"], [reason], "")

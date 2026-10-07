@@ -6,7 +6,9 @@
       "manifest": "art_source/spritecook-assets.json",
       "override": "tmp/generator_hook_override.json",
       "cli_tools": {"tools/sprite_fusion.py": "spritefusion", "tools/retro_diffusion.py": "retrodiffusion"},
-      "review_specs": true
+      "review_specs": true,
+      "require_pipeline": false,
+      "rejections": "art_source/rejections.jsonl"
     }
 
 Every key is optional; the defaults above apply when the file or a key is absent.
@@ -22,6 +24,7 @@ from typing import Any
 CONFIG_NAME = "spritewarden.json"
 DEFAULT_MANIFEST = "art_source/spritecook-assets.json"
 DEFAULT_OVERRIDE = "tmp/generator_hook_override.json"
+DEFAULT_REJECTIONS = "art_source/rejections.jsonl"
 DEFAULT_CLI_TOOLS = {
     "tools/sprite_fusion.py": "spritefusion",
     "tools/retro_diffusion.py": "retrodiffusion",
@@ -35,6 +38,11 @@ class ProjectConfig:
     override: str = DEFAULT_OVERRIDE
     cli_tools: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_CLI_TOOLS))
     review_specs: bool = True
+    # Strict mode: a rotation/animation call needs a pipeline.json above its source that records the
+    # stage's provider, the anchor, the unseen faces and (for providers with their own character
+    # entity) that entity's id. Off by default so a project opts in.
+    require_pipeline: bool = False
+    rejections: str = DEFAULT_REJECTIONS
     error: str | None = None  # a malformed spritewarden.json: defaults are used and the error is reported
 
     @property
@@ -44,6 +52,10 @@ class ProjectConfig:
     @property
     def override_path(self) -> Path:
         return self.resolve(self.override)
+
+    @property
+    def rejections_path(self) -> Path:
+        return self.resolve(self.rejections)
 
     def resolve(self, path: str | Path) -> Path:
         p = Path(path)
@@ -81,6 +93,10 @@ def load_config(project_root: str | Path) -> ProjectConfig:
             cfg.cli_tools = {str(k).replace("\\", "/"): str(v) for k, v in tools.items()}
         if "review_specs" in raw:
             cfg.review_specs = bool(raw["review_specs"])
+        if "require_pipeline" in raw:
+            cfg.require_pipeline = bool(raw["require_pipeline"])
+        if isinstance(raw.get("rejections"), str):
+            cfg.rejections = raw["rejections"]
     except ValueError as exc:
         cfg.error = f"{CONFIG_NAME}: {exc}"
     return cfg

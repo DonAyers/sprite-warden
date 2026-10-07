@@ -97,6 +97,28 @@ def write_record(
     }
     if extra:
         record.update(extra)
+    previous = load_record(image_path)
+    if previous and previous.get("rejected") and previous.get("sha256") == record["sha256"]:
+        record["rejected"] = previous["rejected"]  # judging the same bytes again does not undo a person's "no"
+    out = record_path(image_path)
+    out.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+    return out
+
+
+def mark_rejected(image_path: str | Path, *, by: str, reason: str) -> Path:
+    """Record a person's "no" on the image's sidecar (created if absent).
+
+    From then on ``passed_gates`` returns nothing for these bytes: the image cannot be a source
+    for a rotation or animation and cannot go on a review page again, whatever the judges said.
+    Changing the image (a new sha256) makes it a new candidate that must be gated afresh.
+    """
+    image_path = Path(image_path)
+    record = load_record(image_path) or {
+        "version": RECORD_VERSION, "image": image_path.name, "spritewarden": _version(), "params": {}, "gates": {},
+    }
+    record["sha256"] = sha256_of(image_path)
+    record["rejected"] = {"by": by, "reason": reason,
+                          "time": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     out = record_path(image_path)
     out.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
     return out
@@ -123,6 +145,8 @@ def passed_gates(image_path: str | Path) -> set[str]:
             return set()
     except OSError:
         return set()
+    if record.get("rejected"):
+        return set()  # a person said no: no gate result outlives that
     gates = record.get("gates", {})
     if isinstance(gates, list):
         return {str(g) for g in gates}
@@ -152,13 +176,53 @@ def _expand(paths: Iterable[str | Path]) -> list[Path]:
     return [p for p in out if not p.name.endswith(RECORD_SUFFIX)]
 
 
-def require_passed(paths: Iterable[str | Path], gates: Iterable[str]) -> dict[str, Any]:
+_SOUTH_NAMES = ("south", "s", "down", "front")
+
+
+def review_problem(image_path: str | Path) -> str | None:
+    """Why a gated image is still not fit to be SHOWN to a person, or None.
+
+    The pixel gates are necessary, not sufficient: the flaws people actually reject are a turned
+    view that grew a part the design does not have, and an animation that lost a part of its
+    still. So a record written by ``judge-views`` must carry a passed ``vision_reference`` (the
+    comparison with the anchor) unless the image IS the anchor view, and one written by
+    ``judge-anim`` must have been run with ``--source`` (``frame_integrity`` against the still).
+    Records without a ``params.command`` (written by other tools) are not second-guessed.
+    """
+    record = load_record(image_path)
+    if not record:
+        return None
+    params = record.get("params") if isinstance(record.get("params"), dict) else {}
+    gates = record.get("gates") if isinstance(record.get("gates"), dict) else {}
+    command = params.get("command")
+    if command == "judge-views":
+        vision = gates.get("vision_reference")
+        if vision is None:
+            facing = str(params.get("facing") or "").lower()
+            anchor_facing = str(params.get("anchor_facing") or "south").lower()
+            is_anchor_view = bool(facing) and not params.get("anchor") and (
+                facing == anchor_facing or (facing in _SOUTH_NAMES and anchor_facing in _SOUTH_NAMES))
+            if not is_anchor_view:
+                return "never compared with the anchor by vision (no vision_reference gate)"
+        elif not (vision if isinstance(vision, bool) else bool((vision or {}).get("passed"))):
+            return "the vision comparison with the anchor failed"
+    elif command == "judge-anim":
+        if not params.get("source"):
+            return "judged without --source (frames never compared with the still they came from)"
+        integrity = gates.get("frame_integrity")
+        if isinstance(integrity, dict) and not integrity.get("passed", False):
+            return "frame_integrity failed"
+    return None
+
+
+def require_passed(paths: Iterable[str | Path], gates: Iterable[str], *, strict: bool = True) -> dict[str, Any]:
     """Review gatekeeper: which files lack a current passed record for ANY of ``gates``.
 
     Returns ``{"ok": bool, "required": [...], "checked": n, "missing": [{"path", "reason", "passed"}], "passed": [...]}``.
     A file is accepted when at least one of the required gate names is in its
-    current passed set (``--require start_image`` also accepts ``still``? no: name
-    exactly what you need; pass several names to accept any of them).
+    current passed set (name exactly what you need; pass several names to accept
+    any of them) AND, with ``strict`` (the default), ``review_problem`` finds it
+    fit to be shown.
     """
     required = [g for g in gates if g]
     files = _expand(paths)
@@ -182,6 +246,10 @@ def require_passed(paths: Iterable[str | Path], gates: Iterable[str]) -> dict[st
                 "reason": f"record has no passed {' / '.join(required)} gate",
                 "passed": sorted(have),
             })
+            continue
+        problem = review_problem(f) if strict else None
+        if problem:
+            missing.append({"path": str(f), "reason": problem, "passed": sorted(have)})
             continue
         ok_files.append(str(f))
     return {

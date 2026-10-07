@@ -95,6 +95,11 @@ class ProviderRecipes(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     defaults: dict[str, Any] = Field(default_factory=dict)
     enforce: dict[str, Any] = Field(default_factory=dict, description="Provider-wide tool mapping and rules")
+    identity: dict[str, Any] = Field(
+        default_factory=dict,
+        description="The provider's OWN concept of a character identity: entity (bool), concept, create_with, "
+                    "id_args, reuse, dont, sources",
+    )
     operations: dict[str, Recipe] = Field(default_factory=dict)
 
     def find(self, operation: str) -> Recipe | None:
@@ -109,6 +114,8 @@ class RecipeRegistry(BaseModel):
     version: int = 1
     source_document: str = ""
     gate_names: list[str] = Field(default_factory=list)
+    pipeline_rules: list[str] = Field(default_factory=list, description="The standing rules of the staged pipeline")
+    stages: list[dict[str, Any]] = Field(default_factory=list, description="The stages, their command and gate")
     providers: dict[str, ProviderRecipes] = Field(default_factory=dict)
 
     def canonical_provider(self, provider: str) -> str | None:
@@ -187,12 +194,14 @@ def _build(raw: dict[str, Any]) -> RecipeRegistry:
             ops[oname] = Recipe(**merged)
         providers[pname] = ProviderRecipes(
             provider=pname, aliases=list(pdata.get("aliases", [])), defaults=defaults,
-            enforce=dict(pdata.get("enforce") or {}), operations=ops
+            enforce=dict(pdata.get("enforce") or {}), identity=dict(pdata.get("identity") or {}), operations=ops
         )
     return RecipeRegistry(
         version=int(raw.get("version", 1)),
         source_document=str(raw.get("source_document", "")),
         gate_names=list(raw.get("gate_names", [])),
+        pipeline_rules=list(raw.get("pipeline_rules", [])),
+        stages=list(raw.get("stages", [])),
         providers=providers,
     )
 

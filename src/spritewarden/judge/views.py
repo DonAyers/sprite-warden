@@ -280,8 +280,12 @@ def compare_views_to_anchor(
     skip_anchor_view: bool = False,
     description: str = "",
     expected_perspective: str = "low top-down (approx 20-30 degrees)",
+    faces: dict[str, str] | None = None,
 ) -> dict[str, GateResult]:
     """Reference-aware vision for every view of a set: facing -> ``vision_reference`` gate.
+
+    ``faces`` (the pipeline's description of the back / left / right of the design) goes into
+    every comparison so "invented" has a definition.
 
     Each view is compared with the anchor by ``judge.compare_to_reference`` with the view's
     facing and the anchor's facing in the prompt (parts hidden by the turn are expected;
@@ -296,9 +300,10 @@ def compare_views_to_anchor(
         facing = canonical_facing(name) or name
         if skip_anchor_view and facing == anchor_canon:
             continue
+        extra = {"faces": faces} if faces else {}
         comparison = judge.compare_to_reference(
             img, anchor, facing=facing, anchor_facing=anchor_canon,
-            description=description, expected_perspective=expected_perspective,
+            description=description, expected_perspective=expected_perspective, **extra,
         )
         out[facing] = reference_gate(comparison, facing=facing)
     return out

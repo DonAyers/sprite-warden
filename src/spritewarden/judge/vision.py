@@ -117,7 +117,10 @@ class ReferenceComparison(BaseModel):
         out = [f"invented: {p.text()} -- no counterpart on the anchor's design" for p in self.invented_parts]
         where = f" from {self.candidate_facing}" if self.candidate_facing else ""
         out += [f"missing: {p.text()} -- should be visible{where}" for p in self.missing_visible_parts]
-        if self.same_character is False:
+        # The model's bare "not the same character" is a verdict, and verdicts are what we do not trust
+        # (it said so of a front view pixel-identical to its anchor, 2026-10-07). It counts only when the
+        # model also named something concrete that differs; alone it is reported as a warning.
+        if self.same_character is False and (out or self.changed_parts):
             out.append("identity: the model does not read the candidate as the same character")
         gap = self.elevation_gap()
         if gap is not None and gap > ELEVATION_TOLERANCE_DEGREES:
@@ -280,9 +283,26 @@ def reference_prompt(
     anchor_facing: str = "south",
     description: str = "",
     expected_perspective: str = "low top-down (approx 20-30 degrees)",
+    faces: dict[str, str] | None = None,
 ) -> str:
-    """The comparison question. Primary: what did the candidate INVENT? Occlusion is not a difference."""
+    """The comparison question. Primary: what did the candidate INVENT? Occlusion is not a difference.
+
+    ``faces`` is the design's own description of what the anchor cannot show (``back`` / ``left``
+    / ``right``, e.g. "plain grey panel, no lights"). With it the model has something to hold a
+    turned view against; without it, "is this bolt on the back invented?" is a guess.
+    """
     turned = candidate_facing != anchor_facing
+    declared = {k: str(v).strip() for k, v in (faces or {}).items() if str(v or "").strip()}
+    faces_text = ""
+    if declared:
+        faces_text = (
+            "\nTHE APPROVED DESIGN OF THE FACES THE ANCHOR DOES NOT SHOW (the designer's own words; this is the "
+            "whole design of those faces):\n"
+            + "\n".join(f"- {name}: {text}" for name, text in declared.items())
+            + "\nAnything drawn on those faces that this description does not cover is an INVENTED part, however "
+              "plausible it looks. A face described as plain must be plain: a lamp, boss, bolt, vent or panel line "
+              "on it is invented."
+        )
     turn_text = (
         f"The ANCHOR shows the character facing {anchor_facing}. The CANDIDATE should be the SAME character turned to "
         f"face {candidate_facing}. Because it turned, some faces of the body now point away from the camera: parts on "
@@ -294,7 +314,7 @@ def reference_prompt(
     return f"""You are a pixel-art art director checking a sprite against its approved design, on one board.
 LEFT = ANCHOR (the approved design). RIGHT = CANDIDATE.
 Subject: {description or 'game character'}. Expected camera: {expected_perspective}.
-{turn_text}
+{turn_text}{faces_text}
 
 Answer these questions in order.
 
@@ -367,6 +387,8 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
     other = [d for d in comparison.differences if d not in comparison.anomalies()]
     warnings = [f"{d.kind}: {d.part} {d.detail}".strip() for d in other]
     warnings += [f"changed: {p.text()}" for p in comparison.changed_parts]
+    if comparison.same_character is False and passed:
+        warnings.append("identity: the model said \"not the same character\" but named nothing that differs (not counted)")
     sides = comparison.tool_sides
     if isinstance(sides.get("anchor"), dict) and isinstance(sides.get("candidate"), dict):
         for tool, side in sides["anchor"].items():
@@ -518,6 +540,7 @@ Only return valid JSON."""
         description: str = "",
         expected_perspective: str = "low top-down (approx 20-30 degrees)",
         zoom: int = 6,
+        faces: dict[str, str] | None = None,
     ) -> ReferenceComparison:
         """Anchor + candidate on one board; ask what the candidate INVENTED and what it lost.
 
@@ -540,6 +563,7 @@ Only return valid JSON."""
             anchor_facing=anchor_facing,
             description=description,
             expected_perspective=expected_perspective,
+            faces=faces,
         )
         board = prepare_pair_for_vision(reference, candidate, zoom=zoom, labels=("ANCHOR", "CANDIDATE"))
         content = [

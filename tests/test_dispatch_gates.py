@@ -87,7 +87,9 @@ def test_asset_ids_and_pipeline_resolve_like_the_hook(tmp_path, monkeypatch):
     out = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path)
     assert out.success is False and "anchor.png has no gate record" in out.error
 
-    write_record(src, {"still": True})  # an umbrella gate satisfies it
+    write_record(src, {"still": True})  # clean pixels are not anchor readiness
+    assert gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path).success is False
+    write_record(src, {"start_image": True})
     assert gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path).success is True
 
     (bot / "pipeline.json").write_text(json.dumps({"animation_provider": "pixellab"}), encoding="utf-8")

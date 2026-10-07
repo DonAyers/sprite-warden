@@ -311,9 +311,25 @@ def test_cli_input_must_be_gated_and_current(tmp_path):
     v = check_call("Bash", cmd, tmp_path)
     assert v.decision == "deny" and "changed since it was gated" in v.reasons[0]
 
-    # an umbrella name satisfies the recipe too
+    # clean pixels are not anchor readiness: `still` (or `anim`) does not stand in for start_image
+    for other in ("still", "anim", "views"):
+        write_record(src, {other: True})
+        v = check_call("Bash", cmd, tmp_path)
+        assert v.decision == "deny" and "no current passed gate among start_image" in v.reasons[0], other
+    # ... but an animation may start from a gated view of the set
+    write_record(src, {"views": True})
+    assert check_call("Bash", _bash("python tools/retro_diffusion.py generate --style rd_advanced_animation__walking --input art/a.png --size 32"), tmp_path).decision == "allow"
     write_record(src, {"still": True})
-    assert check_call("Bash", cmd, tmp_path).decision == "allow"
+    assert check_call("Bash", _bash("python tools/retro_diffusion.py generate --style rd_advanced_animation__walking --input art/a.png --size 32"), tmp_path).decision == "deny"
+    # a person's "no" outlives every gate result
+    from spritewarden.gates.records import mark_rejected
+
+    write_record(src, {"start_image": True})
+    mark_rejected(src, by="don", reason="orbs on the head")
+    v = check_call("Bash", cmd, tmp_path)
+    assert v.decision == "deny" and "rejected by don (orbs on the head)" in v.reasons[0]
+    write_record(src, {"start_image": True})  # judging the same bytes again does not undo it
+    assert check_call("Bash", cmd, tmp_path).decision == "deny"
     # edits create anchors: their input is not gated
     _png(tmp_path / "raw.png")
     assert check_call("Bash", _bash("python tools/sprite_fusion.py edit --input raw.png --prompt 'add a hat'"), tmp_path).decision == "allow"
@@ -496,12 +512,19 @@ def test_review_pages_need_gated_images(tmp_path):
     assert check_call("Artifact", {"file_path": page}, tmp_path).decision == "ignore"
 
 
-def test_internal_errors_fail_open_loudly(tmp_path, monkeypatch):
+def test_internal_errors_fail_closed(tmp_path, monkeypatch):
     # a registry with a rule kind nobody implements
     reg = copy.deepcopy(load_raw_registry())
     reg["providers"]["spritecook"]["enforce"]["rules"].append({"kind": "telepathy"})
     v = check_call(SC + "generate_game_art", {"prompt": "robot"}, tmp_path, registry=reg)
-    assert v.decision == "allow" and v.context.startswith("gatekeeper error: ValueError:") and "telepathy" in v.context
+    assert v.decision == "deny" and v.reasons[0].startswith("gatekeeper error: ValueError:") and "telepathy" in v.reasons[0]
+    assert "NOT checked" in v.reasons[0]
+    # the override file still lets a call through on purpose
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "tmp" / "generator_hook_override.json").write_text(json.dumps({"reason": "known bug", "calls": 1}), encoding="utf-8")
+    v = check_call(SC + "generate_game_art", {"prompt": "robot"}, tmp_path, registry=reg)
+    assert v.decision == "allow" and "known bug" in v.context
+    assert check_call(SC + "generate_game_art", {"prompt": "robot"}, tmp_path, registry=reg).decision == "deny"
     # ... which never turns an ignored call into noise
     assert check_call(SC + "get_credit_balance", {}, tmp_path, registry=reg).decision == "ignore"
 
@@ -511,12 +534,12 @@ def test_internal_errors_fail_open_loudly(tmp_path, monkeypatch):
     write_record(tmp_path / "art" / "anchor.png", {"start_image": True})
     _manifest(tmp_path, {"assets": [{"asset_id": ASSET, "file": "art/anchor.png"}]})
     v = check_call(SC + "animate_game_art", {"asset_id": ASSET, "prompt": "swings"}, tmp_path)
-    assert v.decision == "allow" and v.context.startswith("gatekeeper error: ")
+    assert v.decision == "deny" and v.reasons[0].startswith("gatekeeper error: ")
 
     # a malformed project config
     (tmp_path / "spritewarden.json").write_text("{not json", encoding="utf-8")
     v = check_call(SC + "generate_game_art", {"prompt": "robot"}, tmp_path)
-    assert v.decision == "allow" and "gatekeeper error" in v.context and "spritewarden.json" in v.context
+    assert v.decision == "deny" and "gatekeeper error" in v.reasons[0] and "spritewarden.json" in v.reasons[0]
     assert check_call("Bash", _bash("git status"), tmp_path).decision == "ignore"
 
     # anything unexpected while classifying is swallowed too

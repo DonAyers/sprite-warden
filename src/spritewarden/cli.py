@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-FAST_COMMANDS = ("hook", "check-call")
+FAST_COMMANDS = ("hook", "check-call", "rules", "pipeline")
 
 
 def main(argv: list[str] | None = None) -> None:

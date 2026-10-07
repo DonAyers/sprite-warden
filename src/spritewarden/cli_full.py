@@ -201,6 +201,29 @@ def _write_records(paths, gates: dict, params: dict, enabled: bool) -> list[str]
     return written
 
 
+def _failed(card) -> list[dict]:
+    from .gates.rejections import failed_gates
+
+    return failed_gates(card)
+
+
+def _log_rejection(args: argparse.Namespace, image, command: str, failed: list[dict]) -> None:
+    """Append a failed judgement to the project's rejection log (unless --no-record); never fails the command."""
+    if getattr(args, "no_record", False) or not failed:
+        return
+    from .gates.rejections import log_rejection
+
+    log_rejection(image, by="gate", command=command, failed=failed)
+
+
+def _pipeline_for(path) -> tuple[dict, Path | None]:
+    """The nearest pipeline.json above ``path`` (``{}`` when there is none or it is unreadable)."""
+    from .enforce.core import find_pipeline
+
+    data, where = find_pipeline(Path(path).resolve())
+    return (data or {}), where
+
+
 def cmd_judge_still(args: argparse.Namespace) -> int:
     identity = _load_identity(getattr(args, "char_id", None))
     card = evaluate_still(
@@ -254,7 +277,8 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
         if not ref_gate.passed:
             card.summary = f"{card.summary}; reference comparison failed" if card.passed is False else card.summary
 
-    overall = verdict.passed if verdict else card.passed
+    # Both must hold: a friendly vision verdict never outvotes a failed deterministic or reference gate.
+    overall = bool(card.passed) and (verdict.passed if verdict else True)
     from .gates import gates_from_scorecard
 
     gates = gates_from_scorecard(card)
@@ -268,6 +292,11 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
                                               "size_tier", "margin", "facing", "char_id", "vision", "vision_model")),
         not getattr(args, "no_record", False),
     )
+    if not overall:
+        failed = _failed(card)
+        if verdict and not verdict.passed:
+            failed.append({"name": "vision", "errors": [verdict.reasoning_summary]})
+        _log_rejection(args, args.image, "judge-still", failed)
 
     if args.json:
         out_dict = card.model_dump()
@@ -277,8 +306,8 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
         print(json.dumps(out_dict, indent=2))
         return 0 if overall else 1
 
-    status_style = "bold green" if (verdict.passed if verdict else card.passed) else "bold red"
-    status_text = "PASSED" if (verdict.passed if verdict else card.passed) else "FAILED"
+    status_style = "bold green" if overall else "bold red"
+    status_text = "PASSED" if overall else "FAILED"
     console.print(f"[{status_style}]Still Evaluation: {status_text}[/] - {card.path} (Score: {card.score:.2f})")
     console.print(f"Summary: {card.summary}\n")
 
@@ -364,11 +393,21 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
         if vision_anchor is None:
             console.print(f"[bold red]--vision needs an anchor:[/] pass --anchor, or include a {anchor_facing} view")
             return 1
+        # The design of the faces the anchor cannot show, from the character's pipeline.json.
+        faces = getattr(args, "faces", None)
+        pipeline_desc = ""
+        if faces is None:
+            pl, _ = _pipeline_for(args.source)
+            faces = pl.get("faces") if isinstance(pl.get("faces"), dict) else None
+            pipeline_desc = str(pl.get("description") or "")
+        faces = {k: str(v) for k, v in (faces or {}).items() if str(v or "").strip()} or None
         vision_gates = compare_views_to_anchor(
             frames, vision_anchor, VisionJudge(vision_model=args.vision_model),
             anchor_facing=anchor_facing, skip_anchor_view=skip_anchor_view,
-            description=getattr(args, "desc", "") or (identity.prompt_description if identity is not None else ""),
+            description=(getattr(args, "desc", "") or pipeline_desc
+                         or (identity.prompt_description if identity is not None else "")),
             expected_perspective=args.perspective,
+            faces=faces,
         )
         vision_gate = vision_summary_gate(vision_gates)
     overall = bool(gate.passed) and (vision_gate is None or vision_gate.passed)
@@ -394,6 +433,12 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
             records += _write_records([path], own, {**params, "facing": facing}, enabled)
     else:
         records = _write_records(targets, {**gates, **gates_from_scorecard(vision_gate)}, params, enabled)
+
+    if not gate.passed:
+        _log_rejection(args, src, "judge-views", _failed(gate))
+    for facing, vgate in vision_gates.items():
+        if not vgate.passed:
+            _log_rejection(args, files.get(facing, src), "judge-views", _failed(vgate))
 
     if args.json:
         out_dict = gate.model_dump()
@@ -462,6 +507,8 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette", "source", "char_id")),
         not getattr(args, "no_record", False),
     )
+    if not card.passed:
+        _log_rejection(args, src, "judge-anim", _failed(card))
 
     if args.json:
         out_dict = card.model_dump()
@@ -500,7 +547,7 @@ def cmd_review_check(args: argparse.Namespace) -> int:
     from .gates import require_passed
 
     required = [g.strip() for g in args.require.split(",") if g.strip()]
-    report = require_passed(args.paths, required)
+    report = require_passed(args.paths, required, strict=not getattr(args, "loose", False))
     if args.json:
         print(json.dumps(report, indent=2))
         return 0 if report["ok"] else 1
@@ -519,6 +566,274 @@ def cmd_review_check(args: argparse.Namespace) -> int:
         console.print(f" • {m['path']}: {m['reason']}{have}")
     console.print("[dim]Gate them first: warden judge-still --start-image / judge-views / judge-anim[/]")
     return 1
+
+
+STAGE_GROUND = (86, 104, 84, 255)  # a mid-tone floor: art is judged on a ground, never on white
+
+
+def _keep_raw(path: Path) -> None:
+    """Keep the provider's untouched output in ``_raw/`` beside it before the first in-place change."""
+    raw = path.parent / "_raw" / path.name
+    if not raw.exists():
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(path.read_bytes())
+
+
+def _normalize_image(path: Path, canvas: int | None, palette: str | None, *, align: str = "center",
+                     ground_row: int | None = None) -> list[str]:
+    """Pad to the set's square canvas and snap to the palette, in place; returns what changed."""
+    from PIL import Image
+
+    from .judge.palette import remap_image
+    from .sheet.pad import pad_image
+
+    changed: list[str] = []
+    img = Image.open(path).convert("RGBA")
+    out = img
+    if canvas and img.size != (canvas, canvas):
+        if ground_row is not None:
+            box = img.getbbox()
+            content = img.crop(box) if box else img
+            if content.width > canvas or content.height > canvas:
+                raise ValueError(f"{path.name}: content {content.width}x{content.height} does not fit a {canvas}px canvas")
+            out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+            out.paste(content, ((canvas - content.width) // 2, max(0, ground_row + 1 - content.height)))
+        else:
+            out, warnings = pad_image(img, (canvas, canvas), align=align, margin=0)
+            if warnings:
+                raise ValueError(f"{path.name}: {'; '.join(warnings)}")
+        changed.append(f"canvas {img.width}x{img.height} -> {canvas}x{canvas}")
+    if palette:
+        snapped, _, _ = remap_image(out, palette)
+        if snapped.tobytes() != out.tobytes():
+            changed.append(f"palette -> {palette}")
+            out = snapped
+    if changed:
+        _keep_raw(path)
+        out.save(path)
+    return changed
+
+
+def _align_set_to_ground(paths: list[Path], ground_row: int | None) -> int:
+    """Shift EVERY view by the same dy so the set's median ground row is the anchor's; returns dy (0 = untouched).
+
+    A provider places its output where it likes on the canvas (bottom-aligned, say) while the anchor
+    sits elsewhere: that is framing, not a flaw. The views move together, so a view that really
+    floats or sinks relative to its siblings still fails the ground-row check afterwards.
+    """
+    from PIL import Image
+
+    if ground_row is None or not paths:
+        return 0
+    images = [Image.open(p).convert("RGBA") for p in paths]
+    boxes = [img.getbbox() for img in images]
+    if any(b is None for b in boxes):
+        return 0
+    bottoms = sorted(b[3] - 1 for b in boxes)
+    dy = ground_row - bottoms[len(bottoms) // 2]
+    if dy == 0:
+        return 0
+    if any(b[1] + dy < 0 or b[3] + dy > img.height for b, img in zip(boxes, images)):
+        return 0  # would push art off the canvas: leave it for the gate to report
+    for path, img in zip(paths, images):
+        moved = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        moved.paste(img, (0, dy))
+        _keep_raw(path)
+        moved.save(path)
+    return dy
+
+
+def _contact_sheet(items: list[tuple[str, Path]], out_path: Path, scale: int) -> Path:
+    """The images side by side on a floor colour at a whole-pixel multiple of the game's scale."""
+    from PIL import Image
+
+    images = [(label, Image.open(p).convert("RGBA")) for label, p in items]
+    gap = 4
+    width = sum(img.width for _, img in images) + gap * (len(images) + 1)
+    height = max(img.height for _, img in images) + 2 * gap
+    sheet = Image.new("RGBA", (width, height), STAGE_GROUND)
+    x = gap
+    for _, img in images:
+        sheet.alpha_composite(img, (x, height - gap - img.height))
+        x += img.width + gap
+    sheet = sheet.resize((width * scale, height * scale), Image.NEAREST)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out_path)
+    return out_path
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    """One pipeline stage, end to end. Everything it needs comes from the character's pipeline.json."""
+    from .enforce import find_project_root, load_config
+    from .enforce.pipeline import check_pipeline
+
+    target = Path(args.target)
+    if not target.exists():
+        console.print(f"[bold red]Not found:[/] {target}")
+        return 1
+    pipeline, where = _pipeline_for(target)
+    cfg = load_config(find_project_root(target.resolve().parent))
+    canvas = pipeline.get("canvas") if isinstance(pipeline.get("canvas"), int) else None
+    palette = str(pipeline.get("palette") or "luap-40")
+    char_id = pipeline.get("char_id")
+    if where is None:
+        console.print("[yellow]warning:[/] no pipeline.json above this path: using defaults (palette luap-40, no "
+                      "canvas, no faces). `warden pipeline init <character folder>` records the route.")
+    kind = args.kind
+    console.print(f"[bold]Stage {kind}[/] - {cfg.relative(target)}"
+                  + (f"  [dim]({cfg.relative(where)})[/]" if where else ""))
+
+    def step(text: str) -> None:
+        console.print(f"[cyan]>[/] {text}")
+
+    try:
+        if kind == "anchor":
+            if not args.no_normalize:
+                for change in _normalize_image(target, canvas, palette, align=str(pipeline.get("align") or "center")):
+                    step(f"normalized: {change} (original kept in _raw/)")
+            step("gate: start_image (square, margin, symmetry, size tier, strays, native pixels, palette)")
+            rc = cmd_judge_still(argparse.Namespace(
+                image=str(target), palette=palette, scale=None, symmetry=False, start_image=True, target_height=None,
+                size_tier=pipeline.get("size_tier"), margin=3, facing=str(pipeline.get("anchor_facing") or "south"),
+                char_id=char_id, reference=None, anchor_facing="south", vision=False,
+                vision_model=args.vision_model, desc=pipeline.get("description"), perspective="low top-down",
+                no_record=False, json=False))
+            if rc != 0:
+                console.print("[bold red]STAGE FAILED at start_image.[/] Fix the image (not the prompt of the next "
+                              "step) and run this again. The failure is in the rejection log.")
+                return 1
+            sheet = _contact_sheet([("anchor", target)], target.parent / "_stage" / f"{target.stem}_x{args.scale}.png", args.scale)
+            step(f"game-scale view: {cfg.relative(sheet)}")
+            recorded = pipeline.get("anchor")
+            rel = cfg.relative(target)
+            if where is not None and recorded != rel:
+                step(f"record it as THE anchor: warden pipeline set {cfg.relative(where.parent)} anchor={rel}")
+            if where is not None:
+                for p in check_pipeline(pipeline, cfg, where):
+                    if p["stage"] == "views":
+                        step(f"before turning it: {p['text']}")
+            console.print("[bold green]STAGE PASSED: anchor.[/]")
+            return 0
+
+        if kind == "views":
+            if not target.is_dir():
+                console.print("[bold red]views needs a folder of <facing>.png files[/]")
+                return 1
+            anchor = args.anchor or (str(cfg.resolve(pipeline["anchor"])) if pipeline.get("anchor") else None)
+            if not anchor or not Path(anchor).is_file():
+                console.print("[bold red]No anchor:[/] pass --anchor or record it in pipeline.json (one anchor per set)")
+                return 1
+            from .gates import passed_gates
+            from .judge.views import GAME_ORDER, direction_frame_files
+
+            if "start_image" not in passed_gates(anchor):
+                console.print(f"[bold red]The anchor is not gated:[/] run `warden stage anchor {cfg.relative(anchor)}` first")
+                return 1
+            files = direction_frame_files(target)
+            if len(files) < 4:
+                console.print(f"[bold red]Found {len(files)} facing file(s)[/] in {target}: a set is 4 or 8 (<facing>.png)")
+                return 1
+            if not args.no_normalize:
+                from PIL import Image
+
+                box = Image.open(anchor).convert("RGBA").getbbox()
+                ground = (box[3] - 1) if box else None
+                for facing, path in files.items():
+                    for change in _normalize_image(path, canvas, palette, ground_row=ground):
+                        step(f"{facing}: normalized: {change} (original kept in _raw/)")
+                moved = _align_set_to_ground(list(files.values()), ground)
+                if moved:
+                    step(f"whole set moved {moved:+d}px vertically so it stands on the anchor's ground row "
+                         f"(views keep their offsets to each other; originals kept in _raw/)")
+            vision = not args.no_vision
+            step("gate: direction_set (ground row, height, area, part count, palette)"
+                 + (" + vision_reference (every view against the anchor and the declared faces)" if vision else ""))
+            rc = cmd_judge_views(argparse.Namespace(
+                source=str(target), cell=None, anchor=anchor, palette=palette, no_palette=False, char_id=char_id,
+                ground_tolerance=1, height_tolerance=2, area_tolerance=0.20, vision=vision,
+                vision_model=args.vision_model, anchor_facing=str(pipeline.get("anchor_facing") or "south"),
+                desc=pipeline.get("description"), perspective="low top-down", no_record=False, json=False))
+            ordered = [(f, files[f]) for f in GAME_ORDER if f in files]
+            sheet = _contact_sheet([("anchor", Path(anchor))] + ordered, target / "_stage" / f"views_x{args.scale}.png", args.scale)
+            step(f"game-scale view (anchor first, then {', '.join(f for f, _ in ordered)}): {cfg.relative(sheet)}")
+            if rc != 0:
+                console.print("[bold red]STAGE FAILED: views.[/] Do not show these. A view with an invented or missing "
+                              "part is fixed at its source (the anchor, the declared faces, or a masked inpaint by "
+                              "the SAME provider), not by rerolling the prompt. Failures are in the rejection log.")
+                return 1
+            if not vision:
+                console.print("[bold yellow]STAGE PASSED the pixel gates only.[/] Without the vision comparison the set "
+                              "cannot go on a review page or feed an animation review.")
+                return 0
+            console.print("[bold green]STAGE PASSED: views.[/]")
+            return 0
+
+        # anim
+        source = args.source
+        if not source or not Path(source).is_file():
+            console.print("[bold red]anim needs --source:[/] the still the animation was made from (frames are "
+                          "compared with it: a part the still has must not vanish)")
+            return 1
+        locomotion = pipeline.get("locomotion") if pipeline.get("locomotion") in LOCOMOTION_MODES else None
+        step("gate: frame_integrity vs the still, loop, anomalies, palette" + (", walk mechanics" if args.walk else ""))
+        rc = cmd_judge_anim(argparse.Namespace(
+            path=str(target), cell=args.cell or canvas, walk=args.walk, locomotion=locomotion, char_id=char_id,
+            palette=palette, source=source, no_record=False, json=False))
+        if rc != 0:
+            console.print("[bold red]STAGE FAILED: anim.[/] Do not show it. Fix the still it starts from, or change the "
+                          "provider setting the failed gate names; the failure is in the rejection log.")
+            return 1
+        console.print("[bold green]STAGE PASSED: anim.[/] Final review is in the running game, at game scale.")
+        return 0
+    except ValueError as exc:
+        console.print(f"[bold red]Stage error:[/] {escape(str(exc))}")
+        return 1
+
+
+def cmd_reject(args: argparse.Namespace) -> int:
+    from .gates.records import mark_rejected
+    from .gates.rejections import log_rejection
+
+    rc = 0
+    for raw in args.paths:
+        path = Path(raw)
+        if not path.is_file():
+            console.print(f"[bold red]Not found:[/] {raw}")
+            rc = 1
+            continue
+        mark_rejected(path, by=args.by, reason=args.reason)
+        log = log_rejection(path, by=args.by, reason=args.reason, provider=args.provider)
+        console.print(f"[bold]rejected[/] {raw} [dim](logged to {log})[/]")
+    return rc
+
+
+def cmd_rejections(args: argparse.Namespace) -> int:
+    from .enforce import find_project_root, load_config
+    from .gates.rejections import read_rejections, summarize
+
+    cfg = load_config(Path(args.project) if args.project else find_project_root(Path.cwd()))
+    entries = read_rejections(cfg.rejections_path)
+    if args.provider:
+        key = "".join(ch for ch in args.provider.lower() if ch.isalnum())
+        entries = [e for e in entries if "".join(ch for ch in str(e.get("provider") or "").lower() if ch.isalnum()) == key]
+    groups = summarize(entries)
+    if args.json:
+        print(json.dumps({"log": str(cfg.rejections_path), "count": len(entries), "groups": groups,
+                          "recent": entries[:args.limit]}, indent=2))
+        return 0
+    console.print(f"[bold]{len(entries)} rejection(s)[/] in {cfg.relative(cfg.rejections_path)}")
+    if groups:
+        table = Table(title="What keeps failing", show_header=True)
+        for col in ("Count", "Provider", "Stage", "What", "Example"):
+            table.add_column(col)
+        for g in groups[:12]:
+            table.add_row(str(g["count"]), g["provider"], g["stage"], escape(g["what"]), escape(g["example"][:90]))
+        console.print(table)
+    for e in entries[:args.limit]:
+        what = e.get("reason") or "; ".join(f"{f.get('name')}: {(f.get('errors') or [''])[0]}" for f in e.get("failed", []))
+        console.print(f" • [dim]{e.get('time', '')}[/] {escape('[' + str(e.get('by', 'gate')) + ']')} "
+                      f"{escape(str(e.get('image')))}: {escape(str(what)[:200])}")
+    return 0
 
 
 def _pairs(items: list[str] | None, what: str) -> dict[str, str] | None:
@@ -944,7 +1259,18 @@ def cmd_recipes(args: argparse.Namespace) -> int:
         ) + ("" if si is None or si.required else " (optional)")
         table.add_row(r.provider, r.operation, si_text, ", ".join(r.required_gates_before) or "-", ", ".join(r.required_gates_after) or "-")
     console.print(table)
-    console.print("[dim]warden recipes <provider> <operation> for the full entry; --json for machine output[/]")
+    for pname, prov in reg.providers.items():
+        if args.provider and reg.canonical_provider(args.provider) != pname:
+            continue
+        ident = prov.identity
+        if not ident.get("concept"):
+            continue
+        kind = "its own character entity" if ident.get("entity") else "no character entity"
+        console.print(f"\n[bold cyan]{pname}[/] character identity ({kind}): {escape(ident['concept'])}")
+        for dont in ident.get("dont", []):
+            console.print(f"  [dim]- {escape(dont)}[/]")
+    console.print("[dim]warden recipes <provider> <operation> for the full entry; --json for machine output; "
+                  "warden rules for the standing pipeline rules[/]")
     return 0
 
 
@@ -1058,8 +1384,43 @@ def main(argv: list[str] | None = None) -> None:
     p_rc.add_argument("paths", nargs="+", help="Image files, folders, or glob patterns")
     p_rc.add_argument("--require", default="still",
                       help="Gate name(s) that must have passed, comma-separated; any one satisfies (start_image, views, anim, still, ...)")
+    p_rc.add_argument("--loose", action="store_true",
+                      help="Accept the pixel gates alone (default: a turned view also needs its vision comparison "
+                           "with the anchor, an animation its --source comparison)")
     p_rc.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_rc.set_defaults(func=cmd_review_check)
+
+    # stage (one command per pipeline stage: normalize -> gates -> record -> game-scale contact sheet)
+    p_stage = subparsers.add_parser(
+        "stage", help="Run ONE pipeline stage end to end (anchor | views | anim): canvas + palette, every gate of "
+                      "the stage, the gate records and a game-scale contact sheet; stops at the first failure")
+    p_stage.add_argument("kind", choices=["anchor", "views", "anim"])
+    p_stage.add_argument("target", help="anchor: the south image; views: the folder of <facing>.png; anim: the sheet")
+    p_stage.add_argument("--anchor", help="views: the anchor image (default: pipeline.json's anchor)")
+    p_stage.add_argument("--source", help="anim: the still the animation was made from (required)")
+    p_stage.add_argument("--cell", type=int, help="anim: cell size (default: pipeline.json's canvas)")
+    p_stage.add_argument("--walk", action="store_true", help="anim: also check walk mechanics (pipeline.json's locomotion)")
+    p_stage.add_argument("--no-vision", action="store_true",
+                         help="views: skip the paid vision comparison (the set then cannot go on a review page)")
+    p_stage.add_argument("--no-normalize", action="store_true", help="Do not pad to the canvas or snap to the palette first")
+    p_stage.add_argument("--scale", type=int, default=3, help="Contact sheet scale (default 3 = the game at 1080p)")
+    p_stage.add_argument("--vision-model", default=DEFAULT_VISION_MODEL)
+    p_stage.set_defaults(func=cmd_stage)
+
+    # reject / rejections (the log of every failed gate and every human "no")
+    p_rej = subparsers.add_parser("reject", help="Record a person's rejection of image(s): logged, and the images "
+                                                 "can no longer be a source or go on a review page")
+    p_rej.add_argument("paths", nargs="+", help="Image files")
+    p_rej.add_argument("--reason", required=True, help="What is wrong, in the person's words")
+    p_rej.add_argument("--by", default="owner", help="Who said no (default: owner)")
+    p_rej.add_argument("--provider", help="Provider that made it (default: from pipeline.json)")
+    p_rej.set_defaults(func=cmd_reject)
+    p_rejs = subparsers.add_parser("rejections", help="The rejection log: repeat offenders first, then the newest entries")
+    p_rejs.add_argument("--project", help="Project root (default: found from the cwd)")
+    p_rejs.add_argument("--provider", help="Filter by provider")
+    p_rejs.add_argument("--limit", type=int, default=15, help="Newest entries to list (default 15)")
+    p_rejs.add_argument("--json", action="store_true", help="Output JSON")
+    p_rejs.set_defaults(func=cmd_rejections)
 
     # identity (character identities: what the judges and the router know about a character)
     p_ident = subparsers.add_parser("identity", help="Character identities: set / show / list")
