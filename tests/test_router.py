@@ -48,6 +48,8 @@ def test_pipeline_router_deduplication(tmp_path: Path):
         asset_id="smolbot_idle_south",
         name="SmolBot Idle South",
         file_path="assets/sprites/smolbot.png",
+        asset_type="character",
+        perspective="low top-down",
         game="i-require-maintenance",
         character_id="smolbot",
         tags=["idle", "south"],
@@ -58,7 +60,7 @@ def test_pipeline_router_deduplication(tmp_path: Path):
     result = router.route_request(
         prompt="smolbot idle south",
         game="i-require-maintenance",
-        character_id="smolbot",
+        character_identity="smolbot",
     )
     assert result.action == "reuse_existing"
     assert result.existing_asset_match is not None

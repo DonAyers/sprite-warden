@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from PIL import Image
 
-from ..judge.palette import load_palette, rgb_to_hex
+from ..judge.palette import load_palette, palette_display_name, rgb_to_hex
 from ..judge import evaluate_still
 
 CANDIDATES = [
@@ -90,7 +90,7 @@ def write_gpl_palette(palette_id: str, output_path: str | Path) -> Path:
     colors = load_palette(palette_id)
     lines = [
         "GIMP Palette",
-        f"Name: {palette_id}",
+        f"Name: {palette_display_name(palette_id)}",
         "Columns: 8",
         "#",
     ]

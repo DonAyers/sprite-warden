@@ -35,6 +35,17 @@ BUILTIN_PALETTES = {
     "sweetie-16": SWEETIE_16_HEX,
 }
 
+# Human-facing names (GPL "Name:" lines, review pages); keys are the lowercase ids.
+PALETTE_DISPLAY_NAMES = {
+    "luap-40": "Luap-40",
+    "luap-40-plus": "Luap-40 Plus",
+    "sweetie-16": "Sweetie 16",
+}
+
+
+def palette_display_name(palette_id: str) -> str:
+    return PALETTE_DISPLAY_NAMES.get(str(palette_id).lower(), str(palette_id))
+
 NEUTRAL_CHROMA = 0.03
 GREY_CHROMA = 0.01
 DARK_LIGHTNESS = 0.3
