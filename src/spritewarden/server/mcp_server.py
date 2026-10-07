@@ -1,29 +1,51 @@
-"""MCP server exposing slaygent art repository, QA judges, and smart routing to agents."""
+"""MCP server exposing the spritewarden art repository, QA judges, and smart routing to agents.
+
+Startup is hardened so the server always handshakes: the catalog and router are
+created lazily on first use, heavy optional imports are guarded, and the
+learning scheduler is skipped when ``SPRITEWARDEN_NO_LEARN=1``.
+"""
+
+from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
+
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from ..judge import evaluate_still, evaluate_animation, VisionJudge
 from ..judge.vision import DEFAULT_VISION_MODEL
-from ..tools.aseprite import open_file, find_aseprite
-from ..repo.catalog import AssetCatalog
 from ..repo.identity import CharacterIdentity
-from ..repo.palette import registry as palettes
-from ..reducer import ReduceParams, pixelize, refine
-from ..router import PipelineRouter
-from ..sheet import build_sheets, engine_report, pad_files
-from ..learning.db import LearningDB
-from ..learning.doctor import report as learn_report
-from ..learning.episodes import record_episode as _record_episode
-from ..learning.models import Episode
-from ..learning.proposals import review as _review_proposal
-from ..learning.taxonomy import normalize_perspective
 
-catalog = AssetCatalog()
-router = PipelineRouter(catalog=catalog)
+_catalog: Any = None
+_router: Any = None
+
+
+def get_catalog():
+    """Create the AssetCatalog on first use (SQLite file creation is deferred past startup)."""
+    global _catalog
+    if _catalog is None:
+        from ..repo.catalog import AssetCatalog
+
+        _catalog = AssetCatalog()
+    return _catalog
+
+
+def get_router():
+    """Create the PipelineRouter on first use."""
+    global _router
+    if _router is None:
+        from ..router import PipelineRouter
+
+        _router = PipelineRouter(catalog=get_catalog())
+    return _router
+
+
+def learning_disabled() -> bool:
+    return os.environ.get("SPRITEWARDEN_NO_LEARN", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 INSTRUCTIONS = """\
 spritewarden is the intelligent pixel art pipeline and quality assurance tool.
@@ -52,14 +74,14 @@ def search_art(
     limit: Annotated[int, Field(ge=1, le=50)] = 10,
 ) -> dict:
     """Search the central repository for existing pixel art assets to prevent duplicate generation."""
-    results = catalog.search(query=query, game=game, character_id=character_id, perspective=perspective, limit=limit)
+    results = get_catalog().search(query=query, game=game, character_id=character_id, perspective=perspective, limit=limit)
     return {"count": len(results), "results": results}
 
 
 @mcp.tool()
 def get_character_identity(character_id: Annotated[str, Field(description="Character slug, e.g. 'smolbot', 'tredbot'")]) -> dict:
     """Retrieve the canonical CharacterIdentity (palette, proportions, visual prompt, and constraints)."""
-    ident = catalog.get_identity(character_id)
+    ident = get_catalog().get_identity(character_id)
     if not ident:
         return {"error": f"Character '{character_id}' not found"}
     return ident.model_dump()
@@ -88,7 +110,7 @@ def register_character_identity(
         prompt_description=prompt_description,
         prohibitions=prohibitions,
     )
-    catalog.save_identity(ident)
+    get_catalog().save_identity(ident)
     return {"status": "ok", "identity": ident.model_dump()}
 
 
@@ -105,8 +127,8 @@ def route_generation(
     force_fusion: Annotated[bool, Field(description="Force multi-model OpenRouter Fusion deliberation")] = False,
 ) -> dict:
     """Determine the optimal generator provider and prompt recipe using Jev or OpenRouter Fusion."""
-    char_ident = catalog.get_identity(character_id) if character_id else None
-    result = router.route_request(
+    char_ident = get_catalog().get_identity(character_id) if character_id else None
+    result = get_router().route_request(
         prompt=prompt,
         asset_type=asset_type,
         character_identity=char_ident,
@@ -137,6 +159,8 @@ def build_sprite_sheet(
     recursive: Annotated[bool, Field(description="Recurse into folders")] = False,
 ) -> dict:
     """Combine loose frames or a folder into a cohesive, palette-snapped, evenly-framed spritesheet."""
+    from ..sheet import build_sheets, engine_report
+
     reports = build_sheets(
         paths,
         output,
@@ -172,6 +196,8 @@ def pad_sprite(
     recursive: Annotated[bool, Field(description="Recurse into folders")] = False,
 ) -> dict:
     """Normalize provider output onto a uniform, aligned canvas (providers return varying sizes hugging the edges)."""
+    from ..sheet import pad_files
+
     report = pad_files(
         paths,
         out=output,
@@ -246,6 +272,8 @@ def open_in_aseprite(
 ) -> dict:
     """Launch Aseprite on the host system to view and inspect an asset."""
     try:
+        from ..tools.aseprite import open_file
+
         proc = open_file(file_path)
         return {"status": "ok", "message": f"Opened {file_path} in Aseprite (PID {proc.pid})"}
     except Exception as e:
@@ -269,6 +297,8 @@ def pixelize_image(
     vision_model: Annotated[str, Field(description="Vision model slug")] = DEFAULT_VISION_MODEL,
 ) -> dict:
     """Reduce any image to palette-snapped pixel art; optionally AI-refine the mapping."""
+    from ..reducer import ReduceParams, pixelize, refine
+
     params = ReduceParams(
         width=width,
         dither=dither,  # type: ignore[arg-type]
@@ -307,18 +337,24 @@ def pixelize_image(
 @mcp.resource("spritewarden://playbook", name="playbook", description="Active learned strategies", mime_type="application/json")
 def resource_playbook() -> str:
     """Approved (active) strategies the router can apply, grouped by scope."""
+    from ..learning.db import LearningDB
+
     db = LearningDB()
     return json.dumps({"strategies": [s.model_dump() for s in db.list_strategies(status="active")]}, indent=2)
 
 
 @mcp.resource("spritewarden://proposals", name="proposals", description="Open learned-change proposals awaiting review", mime_type="application/json")
 def resource_proposals() -> str:
+    from ..learning.db import LearningDB
+
     db = LearningDB()
     return json.dumps({"proposals": [p.model_dump() for p in db.list_proposals(status="open")]}, indent=2)
 
 
 @mcp.resource("spritewarden://providers", name="providers", description="Observed provider tools, limits, and watched sources", mime_type="application/json")
 def resource_providers() -> str:
+    from ..learning.db import LearningDB
+
     db = LearningDB()
     return json.dumps(
         {
@@ -331,12 +367,18 @@ def resource_providers() -> str:
 
 @mcp.resource("spritewarden://learn-status", name="learn-status", description="Learning knowledge-base health and staleness", mime_type="application/json")
 def resource_learn_status() -> str:
+    from ..learning.db import LearningDB
+    from ..learning.doctor import report as learn_report
+
     return json.dumps(learn_report(LearningDB()), indent=2)
 
 
 @mcp.tool()
 def learn_status() -> dict:
     """Report learning knowledge-base health: sources, events, episodes, strategies, proposals, budget."""
+    from ..learning.db import LearningDB
+    from ..learning.doctor import report as learn_report
+
     return learn_report(LearningDB())
 
 
@@ -345,6 +387,8 @@ def list_learned_proposals(
     status: Annotated[str, Field(description="open / approved / rejected (default: open)")] = "open",
 ) -> dict:
     """List self-improvement proposals (never auto-applied; review before acting)."""
+    from ..learning.db import LearningDB
+
     db = LearningDB()
     return {"proposals": [p.model_dump() for p in db.list_proposals(status=status)]}
 
@@ -355,6 +399,9 @@ def approve_learned_proposal(
     approve: Annotated[bool, Field(description="True to approve (applies change), False to reject")] = True,
 ) -> dict:
     """Approve/reject a learned proposal; approval activates a strategy or acknowledges a doc change."""
+    from ..learning.db import LearningDB
+    from ..learning.proposals import review as _review_proposal
+
     proposal = _review_proposal(LearningDB(), proposal_id, approve)
     if proposal is None:
         return {"status": "error", "error": f"proposal {proposal_id} not found"}
@@ -372,6 +419,11 @@ def record_learning_episode(
     reason: Annotated[str, Field(description="Why it succeeded/failed (evidence)")] = "",
 ) -> dict:
     """Record a generation attempt's outcome as a learning episode (the reward signal)."""
+    from ..learning.db import LearningDB
+    from ..learning.episodes import record_episode as _record_episode
+    from ..learning.models import Episode
+    from ..learning.taxonomy import normalize_perspective
+
     perspective = normalize_perspective(perspective).canonical or perspective
     eid = _record_episode(
         LearningDB(),
@@ -381,11 +433,19 @@ def record_learning_episode(
     return {"status": "ok", "episode_id": eid}
 
 
-def run_mcp_server() -> None:
+def start_learning_scheduler() -> bool:
+    """Start the background learning watcher unless disabled; never raises."""
+    if learning_disabled():
+        return False
     try:
         from ..learning.scheduler import LearningScheduler
 
         LearningScheduler().start(daemon=True)
+        return True
     except Exception:
-        pass
+        return False
+
+
+def run_mcp_server() -> None:
+    start_learning_scheduler()
     mcp.run()
