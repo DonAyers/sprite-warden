@@ -228,13 +228,26 @@ def judge_still(
     vision_model: Annotated[str, Field(description="Vision model slug (default: google/gemini-2.5-flash)")] = DEFAULT_VISION_MODEL,
     description: Annotated[str, Field(description="Expected visual description of the subject")] = "",
     perspective: Annotated[str, Field(description="Expected perspective view")] = "low top-down",
+    start_image: Annotated[bool, Field(description="Readiness gate for an anchor/start image: square canvas, transparent margin, symmetry (south/north), drawn height vs tier/target, stray components, native 1:1 pixels, palette")] = False,
+    target_height: Annotated[int | None, Field(description="Expected drawn height in px (+-10%) for start_image")] = None,
+    size_tier: Annotated[str | None, Field(description="Resolution tier for start_image: 16-32, 48-64, 96, 128")] = None,
+    margin_px: Annotated[int, Field(description="Required transparent margin for start_image (default 3)")] = 3,
+    facing: Annotated[str, Field(description="Facing of the start image (south/north enable symmetry)")] = "south",
+    character_id: Annotated[str | None, Field(description="CharacterIdentity slug supplying palette, cell size and feature markers")] = None,
 ) -> dict:
-    """Run pixel grid, palette conformity, edge clipping, and symmetry gates on a still image."""
+    """Run pixel grid, palette conformity, edge clipping, symmetry and (opt-in) start-image readiness gates on a still image."""
+    identity = get_catalog().get_identity(character_id) if character_id else None
     card = evaluate_still(
         image_or_path=file_path,
         palette_source=palette,
         scale=scale,
         verify_symmetry=check_symmetry_axis,
+        start_image=start_image,
+        target_height=target_height,
+        size_tier=size_tier,
+        margin_px=margin_px,
+        facing=facing,
+        identity=identity,
     )
     out = card.model_dump()
     if vision:

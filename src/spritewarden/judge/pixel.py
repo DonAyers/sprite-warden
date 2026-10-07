@@ -75,26 +75,29 @@ def _best_origin(pixels, width: int, height: int, scale: int) -> tuple[int, int]
     return best
 
 
-def _uniform_fraction(img: Image.Image, scale: int) -> tuple[float, int]:
-    """Fraction of blocks touching opaque pixels that are flat, at the best origin for ``scale``."""
+def _uniform_fraction(img: Image.Image, scale: int, origin: tuple[int, int] | None = None) -> tuple[float, int]:
+    """Fraction of fully opaque (interior) blocks that are flat, at ``origin`` (default: the best origin).
+
+    Blocks touching transparency are ignored: a silhouette edge is not grid evidence.
+    """
     pixels = img.load()
     width, height = img.size
-    ox, oy = _best_origin(pixels, width, height, scale)
+    ox, oy = origin if origin is not None else _best_origin(pixels, width, height, scale)
     opaque_blocks = 0
     uniform_blocks = 0
     for y0, y1 in _block_ranges(oy, height, scale):
         for x0, x1 in _block_ranges(ox, width, scale):
             first = pixels[x0, y0]
-            any_opaque = False
+            all_opaque = True
             uniform = True
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     p = pixels[x, y]
-                    if p[3] > 0:
-                        any_opaque = True
+                    if p[3] == 0:
+                        all_opaque = False
                     if p != first:
                         uniform = False
-            if not any_opaque:
+            if not all_opaque:
                 continue
             opaque_blocks += 1
             if uniform:
@@ -105,15 +108,23 @@ def _uniform_fraction(img: Image.Image, scale: int) -> tuple[float, int]:
 def detect_block_size(img: Image.Image, max_scale: int = 16, min_fraction: float = 0.97) -> int:
     """Largest block size (2..max_scale) that tiles the drawn pixels almost perfectly, else 1.
 
-    Fully transparent blocks are ignored so padding cannot fake a grid. A native
+    Only fully opaque blocks count, so padding and silhouette edges cannot fake a grid. A native
     sprite has shading detail inside every 2x2, so it stays at 1; a nearest-
     neighbour upscale (or an image model's fake pixels) reports its block size.
     """
     width, height = img.size
+    pixels = img.load()
     best = 1
     for scale in range(2, min(max_scale, width // 2, height // 2) + 1):
-        fraction, opaque = _uniform_fraction(img, scale)
-        if opaque >= 8 and fraction >= min_fraction:
+        ox, oy = _best_origin(pixels, width, height, scale)
+        fraction, opaque = _uniform_fraction(img, scale, (ox, oy))
+        if opaque < 8 or fraction < min_fraction:
+            continue
+        # Evidence of a grid: blocks straddling the half-step offset must break. A flat
+        # region is uniform at every offset and is not a block grid.
+        shifted = ((ox + scale // 2) % scale, (oy + scale // 2) % scale)
+        off_fraction, _ = _uniform_fraction(img, scale, shifted)
+        if off_fraction <= 0.8:
             best = scale
     return best
 

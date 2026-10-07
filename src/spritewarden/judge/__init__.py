@@ -10,6 +10,7 @@ from .bounds import check_clipping, check_symmetry
 from .animation import check_animation_anomalies
 from .walk import check_walk_cycle
 from .loop import check_loop_smoothness, check_gif_timing, drop_loop_stalls
+from .start_image import check_start_image, SIZE_TIERS
 from .vision import VisionJudge, VisionObservation, OrchestratedVerdict
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "check_walk_cycle",
     "check_loop_smoothness",
     "check_gif_timing",
+    "check_start_image",
+    "SIZE_TIERS",
     "drop_loop_stalls",
     "evaluate_still",
     "evaluate_animation",
@@ -42,8 +45,20 @@ def evaluate_still(
     verify_symmetry: bool = False,
     marker_colors: list[str] | None = None,
     save_masks_dir: str | Path | None = None,
+    start_image: bool = False,
+    target_height: int | None = None,
+    size_tier: str | None = None,
+    margin_px: int = 3,
+    facing: str = "south",
+    identity=None,
 ) -> StillScorecard:
-    """Run all relevant checks on a still image or candidate frame."""
+    """Run all relevant checks on a still image or candidate frame.
+
+    ``start_image=True`` adds the readiness gate for an anchor image (square canvas,
+    transparent margin, symmetry for south/north, height vs tier/target, stray
+    components, native pixels, palette); ``identity`` (a CharacterIdentity) is
+    optional and supplies the palette, cell size and feature marker colours.
+    """
     path_str = str(image_or_path) if isinstance(image_or_path, (str, Path)) else "<PIL.Image>"
     if isinstance(image_or_path, (str, Path)):
         img = Image.open(image_or_path).convert("RGBA")
@@ -77,6 +92,20 @@ def evaluate_still(
     if verify_symmetry:
         sym_gate = check_symmetry(img, marker_colors=marker_colors)
         gates.append(sym_gate)
+
+    # Optional Gate 5: Start-image readiness (anchor for rotation / animation)
+    if start_image:
+        gates.append(
+            check_start_image(
+                img,
+                target_height=target_height,
+                size_tier=size_tier,
+                margin_px=margin_px,
+                facing=facing,
+                palette=palette_source,
+                identity=identity,
+            )
+        )
 
     overall_passed = all(g.passed for g in gates)
     avg_score = round(sum(g.score for g in gates) / len(gates), 3)

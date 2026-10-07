@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.markup import escape
 
-from .judge import evaluate_still, evaluate_animation, VisionJudge
+from .judge import evaluate_still, evaluate_animation, VisionJudge, SIZE_TIERS
 from .judge.vision import DEFAULT_VISION_MODEL
 from .tools.aseprite import open_file, edit_sheet_interactive, find_aseprite
 from .repo.catalog import AssetCatalog
@@ -162,12 +162,30 @@ def cmd_pixelize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_identity(char_id: str | None):
+    if not char_id:
+        return None
+    from .repo.catalog import AssetCatalog
+
+    ident = AssetCatalog().get_identity(char_id)
+    if ident is None:
+        console.print(f"[yellow]warning:[/] character identity '{char_id}' not found; continuing without it")
+    return ident
+
+
 def cmd_judge_still(args: argparse.Namespace) -> int:
+    identity = _load_identity(getattr(args, "char_id", None))
     card = evaluate_still(
         image_or_path=args.image,
         palette_source=args.palette,
         scale=args.scale,
         verify_symmetry=args.symmetry,
+        start_image=getattr(args, "start_image", False),
+        target_height=getattr(args, "target_height", None),
+        size_tier=getattr(args, "size_tier", None),
+        margin_px=getattr(args, "margin", 3),
+        facing=getattr(args, "facing", "south"),
+        identity=identity,
     )
 
     verdict = None
@@ -203,9 +221,18 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
     for g in card.gates:
         st = "[green]PASS[/]" if g.passed else "[red]FAIL[/]"
         details = g.errors[0] if g.errors else (g.warnings[0] if g.warnings else g.summary)
-        table.add_row(g.name, st, f"{g.score:.2f}", details)
+        table.add_row(g.name, st, f"{g.score:.2f}", escape(details))
 
     console.print(table)
+
+    start_gate = card.gate("start_image")
+    if start_gate:
+        console.print("\n[bold]Start-image checks:[/]")
+        for name, c in start_gate.details.get("checks", {}).items():
+            mark = "[green]ok[/]" if c["passed"] else ("[dim]skip[/]" if c["passed"] is None else "[red]FAIL[/]")
+            console.print(f" {mark:>14} {name}: {escape(str(c['detail']))}")
+        for wmsg in start_gate.warnings:
+            console.print(f"   [yellow]warning:[/] {escape(wmsg)}")
 
     if verdict:
         console.print("\n[bold magenta]Jev Orchestrated Verdict (Vision + Deterministic):[/]")
@@ -581,6 +608,13 @@ def main() -> None:
     p_still.add_argument("--palette", default="luap-40", help="Target palette name or file")
     p_still.add_argument("--scale", type=int, help="Expected scale factor (inferred if omitted)")
     p_still.add_argument("--symmetry", action="store_true", help="Check silhouette symmetry")
+    p_still.add_argument("--start-image", action="store_true",
+                         help="Readiness gate for an anchor/start image: square, margin, symmetry, height, strays, native pixels, palette")
+    p_still.add_argument("--target-height", type=int, help="Expected drawn height in px (+-10%%) for --start-image")
+    p_still.add_argument("--size-tier", choices=sorted(SIZE_TIERS), help="Resolution tier for --start-image (drawn height range)")
+    p_still.add_argument("--margin", type=int, default=3, help="Required transparent margin in px for --start-image (default 3)")
+    p_still.add_argument("--facing", default="south", help="Facing of the start image (south/north enable the symmetry check)")
+    p_still.add_argument("--char-id", help="CharacterIdentity slug: supplies palette, cell size and feature markers")
     p_still.add_argument("--vision", action="store_true", help="Run multimodal vision model smell-test & Jev decision orchestration")
     p_still.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_still.add_argument("--desc", help="Expected visual description of character/object")
