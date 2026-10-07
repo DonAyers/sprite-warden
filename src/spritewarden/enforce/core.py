@@ -721,6 +721,63 @@ def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]
     return list(dict.fromkeys(reasons))
 
 
+RECIPE_INPUT_KEYS = ("input", "inputs", "input_image", "reference_image", "start_image", "source_image", "image")
+
+
+def recipe_gate_reasons(
+    provider: str,
+    operation: str,
+    params: dict[str, Any] | None,
+    project_root: str | Path,
+    *,
+    registry: dict[str, Any] | None = None,
+) -> list[str]:
+    """Why a recipe must not run yet: its input image is missing, un-gated or belongs to another provider's set.
+
+    Used by ``generator.registry.dispatch``. Only operations that derive from an image (a
+    registry entry with ``enforce.stage`` and ``required_gates_before``) are gated; stills and
+    edits create anchors and are never refused here. The input is resolved like the hook does
+    (asset ids / URLs / character ids through the manifest) plus the recipe's local path
+    params (``RECIPE_INPUT_KEYS``). Raises nothing for unknown recipes: they have no gates.
+    """
+    reg = registry if registry is not None else load_raw_registry()
+    canon = _canonical_provider(reg, provider)
+    prov = (reg.get("providers") or {}).get(canon, {}) if canon else {}
+    name, entry = _find_operation(prov, operation)
+    if entry is None or not entry.get("required_gates_before") or not _enforce(entry).get("stage"):
+        return []
+    cfg = load_config(project_root)
+    args = dict(params or {})
+    call = _Call(provider=canon or provider, operation=name or operation, tool=operation, via="recipe",
+                 args=args, prov=prov, entry=entry)
+    sources, reasons = _resolve_sources(call, cfg)
+    known = {s.path for s in sources}
+    for key in RECIPE_INPUT_KEYS:
+        for value in _values(args.get(key)):
+            if value.startswith(("http://", "https://", "data:")):
+                continue
+            path = cfg.resolve(value)
+            if path not in known:
+                known.add(path)
+                sources.append(_Source(path, "file", f"{key}={value}"))
+    needed = accepted_gates(entry.get("required_gates_before"))
+    if not sources and not reasons:
+        return [
+            f"{call.provider}/{call.operation} requires a gated input image ({' / '.join(entry['required_gates_before'])}) "
+            f"but the recipe names none: pass params.input_image (a local file with a passed gate record) or a "
+            f"registered asset / character id."
+        ]
+    stage = _enforce(entry).get("stage")
+    for source in sources:
+        if source.kind == "views_dir":
+            reasons += _views_dir_reasons(source.path, cfg)
+        else:
+            reasons += gate_reasons(source.path, needed, cfg)
+        if source.path.exists():
+            reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg)
+    return list(dict.fromkeys(reasons))
+
+
 # ----------------------------------------------------------------------------- override + context
 
 def _take_override(cfg: ProjectConfig) -> str | None:

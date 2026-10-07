@@ -12,9 +12,10 @@ in a few milliseconds.
 """
 
 from .config import ProjectConfig, find_project_root, load_config
-from .core import RULE_KINDS, UMBRELLA_GATES, Verdict, check_call, gate_reasons
+from .core import RULE_KINDS, UMBRELLA_GATES, Verdict, check_call, gate_reasons, recipe_gate_reasons
 
 __all__ = [
+    "recipe_gate_reasons",
     "ProjectConfig",
     "RULE_KINDS",
     "UMBRELLA_GATES",

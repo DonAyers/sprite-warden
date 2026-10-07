@@ -569,9 +569,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
     if args.provider:
         recipe.provider = args.provider
+    if getattr(args, "input", None):
+        recipe.params["input_image"] = args.input
 
     out_dir = Path(args.out) if args.out else Path.cwd() / "spritewarden_generated" / _slug(args.prompt)
-    output = dispatch(recipe, out_dir)
+    output = dispatch(
+        recipe, out_dir,
+        force_ungated=getattr(args, "force_ungated", False),
+        project_root=getattr(args, "project", None),
+    )
 
     if args.json:
         print(json.dumps({"recipe": recipe.model_dump(), "output": output.model_dump()}, indent=2))
@@ -876,6 +882,12 @@ def main(argv: list[str] | None = None) -> None:
     p_gen.add_argument("--vehicle", action="store_true", help="Is a vehicle / rigid object")
     p_gen.add_argument("--fusion", action="store_true", help="Force OpenRouter Fusion multi-model deliberation")
     p_gen.add_argument("--provider", help=f"Override the routed provider (drivers: {', '.join(available_providers())})")
+    p_gen.add_argument("--input", metavar="IMAGE",
+                       help="The image a rotation/animation derives from (recipe params.input_image); it must carry a "
+                            "passed gate record for the recipe's required_gates_before")
+    p_gen.add_argument("--force-ungated", action="store_true",
+                       help="Run even though the recipe's input image has no passed gate record (recorded in the output)")
+    p_gen.add_argument("--project", help="Project root for the asset manifest / pipeline.json lookups (default: found from the cwd)")
     p_gen.add_argument("--out", help="Output directory (default: ./spritewarden_generated/<slug>)")
     p_gen.add_argument("--json", action="store_true", help="Output JSON")
     p_gen.set_defaults(func=cmd_generate)
