@@ -237,11 +237,17 @@ def judge_still(
     facing: Annotated[str, Field(description="Facing of the start image (south/north enable symmetry)")] = "south",
     character_id: Annotated[str | None, Field(description="CharacterIdentity slug supplying palette, cell size and feature markers")] = None,
     write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside the image (sha256 + verdicts) so later stages can prove it was gated")] = True,
+    reference_path: Annotated[str | None, Field(description="Approved anchor image: the vision model compares candidate vs anchor side by side (parts added/removed/moved, which hand holds which tool, camera elevation). Anomalies or a perspective mismatch FAIL; offline FAILS (never a silent accept). Defaults to the identity's south turnaround still when character_id is given.")] = None,
 ) -> dict:
-    """Run pixel grid, palette conformity, edge clipping, symmetry and (opt-in) start-image readiness gates on a still image."""
+    """Run pixel grid, palette conformity, edge clipping, symmetry, (opt-in) start-image readiness and (opt-in) reference-comparison gates on a still image."""
     from ..gates import gates_from_scorecard, write_record
+    from ..judge import reference_gate
 
     identity = get_catalog().get_identity(character_id) if character_id else None
+    if not reference_path and identity is not None and identity.turnaround_stills.get("south"):
+        candidate_ref = identity.turnaround_stills["south"]
+        if Path(candidate_ref).is_file():
+            reference_path = candidate_ref
     card = evaluate_still(
         image_or_path=file_path,
         palette_source=palette,
@@ -254,12 +260,26 @@ def judge_still(
         facing=facing,
         identity=identity,
     )
-    out = card.model_dump()
     verdict = None
-    if vision:
+    if vision or reference_path:
         from PIL import Image
         img = Image.open(file_path).convert("RGBA")
         judge = VisionJudge(vision_model=vision_model)
+    if reference_path:
+        ref_img = Image.open(reference_path).convert("RGBA")
+        comparison = judge.compare_to_reference(
+            img, ref_img,
+            facing=None if facing == "south" else facing,
+            description=description,
+            expected_perspective=perspective,
+        )
+        ref_gate = reference_gate(comparison, facing=facing)
+        card.gates.append(ref_gate)
+        card.passed = card.passed and ref_gate.passed
+    out = card.model_dump()
+    if reference_path:
+        out["reference"] = reference_path
+    if vision:
         verdict = judge.orchestrate_judgment(
             still_scorecard=card,
             image=img,
@@ -337,10 +357,11 @@ def review_check(
 def judge_animation(
     sheet_or_dir_path: Annotated[str, Field(description="Path to spritesheet PNG or directory of frame PNGs")],
     cell_size: Annotated[int | None, Field(description="Square cell size for spritesheet, e.g. 64 or 96")] = None,
-    is_walk: Annotated[bool, Field(description="Run walk cadence alternating-foot analysis")] = False,
+    is_walk: Annotated[bool, Field(description="Run the walk-mechanics gate (cadence for legs; steady turning base for wheels/treads)")] = False,
     palette: Annotated[str | None, Field(description="Target palette to check")] = "luap-40",
+    locomotion: Annotated[str, Field(description="legs | wheels | treads: wheels/treads skip cadence and check ground-row steadiness and hub/wheel bbox stability")] = "legs",
 ) -> dict:
-    """Run temporal anomaly, loop smoothness, and walk cadence checks on an animation sequence."""
+    """Run temporal anomaly, loop smoothness, and walk mechanics checks on an animation sequence."""
     from ..gates import gates_from_scorecard, write_record
 
     card = evaluate_animation(
@@ -348,6 +369,7 @@ def judge_animation(
         cell=cell_size,
         is_walk=is_walk,
         palette_source=palette,
+        locomotion=locomotion,
     )
     out = card.model_dump()
     src = Path(sheet_or_dir_path)
@@ -356,7 +378,7 @@ def judge_animation(
     for t in targets:
         try:
             written.append(str(write_record(t, gates_from_scorecard(card, "anim"), params={
-                "command": "judge_animation", "cell": cell_size, "is_walk": is_walk, "palette": palette,
+                "command": "judge_animation", "cell": cell_size, "is_walk": is_walk, "locomotion": locomotion, "palette": palette,
             })))
         except Exception as exc:  # noqa: BLE001
             out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")

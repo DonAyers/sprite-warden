@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.markup import escape
 
-from .judge import evaluate_still, evaluate_animation, VisionJudge, SIZE_TIERS
+from .judge import evaluate_still, evaluate_animation, VisionJudge, SIZE_TIERS, LOCOMOTION_MODES
 from .judge.vision import DEFAULT_VISION_MODEL
 from .tools.aseprite import open_file, edit_sheet_interactive, find_aseprite
 from .repo.catalog import AssetCatalog
@@ -213,16 +213,38 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
     )
 
     verdict = None
-    if args.vision:
+    reference_path = getattr(args, "reference", None)
+    if not reference_path and identity is not None and getattr(identity, "turnaround_stills", None):
+        reference_path = identity.turnaround_stills.get("south")
+        if reference_path and not Path(reference_path).is_file():
+            console.print(f"[yellow]warning:[/] identity south still not found at {reference_path}; no reference comparison")
+            reference_path = None
+    if args.vision or reference_path:
         from PIL import Image
         img = Image.open(args.image).convert("RGBA")
         judge = VisionJudge(vision_model=args.vision_model)
+    if args.vision:
         verdict = judge.orchestrate_judgment(
             still_scorecard=card,
             image=img,
             prompt_description=getattr(args, "desc", "") or "",
             expected_perspective=getattr(args, "perspective", "low top-down"),
         )
+    if reference_path:
+        from .judge import reference_gate
+
+        ref_img = Image.open(reference_path).convert("RGBA")
+        comparison = judge.compare_to_reference(
+            img, ref_img,
+            facing=getattr(args, "facing", None) if getattr(args, "facing", "south") != "south" else None,
+            description=getattr(args, "desc", "") or "",
+            expected_perspective=getattr(args, "perspective", "low top-down"),
+        )
+        ref_gate = reference_gate(comparison, facing=getattr(args, "facing", None))
+        card.gates.append(ref_gate)
+        card.passed = card.passed and ref_gate.passed
+        if not ref_gate.passed:
+            card.summary = f"{card.summary}; reference comparison failed" if card.passed is False else card.summary
 
     overall = verdict.passed if verdict else card.passed
     from .gates import gates_from_scorecard
@@ -365,6 +387,7 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         cell=args.cell,
         is_walk=args.walk,
         palette_source=args.palette,
+        locomotion=args.locomotion,
     )
 
     from .gates import gates_from_scorecard
@@ -373,7 +396,7 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
     targets = sorted(f for f in src.iterdir() if f.suffix.lower() == ".png") if src.is_dir() else [src]
     records = _write_records(
         targets, gates_from_scorecard(card, "anim"),
-        _record_params(args, "judge-anim", ("cell", "walk", "palette")),
+        _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette")),
         not getattr(args, "no_record", False),
     )
 
@@ -764,7 +787,9 @@ def main() -> None:
     p_still.add_argument("--size-tier", choices=sorted(SIZE_TIERS), help="Resolution tier for --start-image (drawn height range)")
     p_still.add_argument("--margin", type=int, default=3, help="Required transparent margin in px for --start-image (default 3)")
     p_still.add_argument("--facing", default="south", help="Facing of the start image (south/north enable the symmetry check)")
-    p_still.add_argument("--char-id", help="CharacterIdentity slug: supplies palette, cell size and feature markers")
+    p_still.add_argument("--char-id", help="CharacterIdentity slug: supplies palette, cell size, feature markers and the south reference still")
+    p_still.add_argument("--reference", help="Approved anchor image: vision compares candidate vs anchor side by side "
+                                             "(parts added/removed/moved, hands, camera); offline = FAIL, never a silent accept")
     p_still.add_argument("--vision", action="store_true", help="Run multimodal vision model smell-test & Jev decision orchestration")
     p_still.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_still.add_argument("--desc", help="Expected visual description of character/object")
@@ -792,7 +817,9 @@ def main() -> None:
     p_anim = subparsers.add_parser("judge-anim", help="Evaluate animation (specks, spikes, walk cadence, loop wrap)")
     p_anim.add_argument("path", help="Path to spritesheet PNG or folder of frames")
     p_anim.add_argument("--cell", type=int, help="Cell dimension for spritesheet (e.g. 64 or 96)")
-    p_anim.add_argument("--walk", action="store_true", help="Check alternating foot walk cadence")
+    p_anim.add_argument("--walk", action="store_true", help="Check walk mechanics (cadence for legs; steady turning base for wheels/treads)")
+    p_anim.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), default="legs",
+                        help="How the character moves: legs (alternating feet), wheels or treads (ground row + hub steadiness)")
     p_anim.add_argument("--palette", default="luap-40", help="Target palette name or file")
     p_anim.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_anim.add_argument("--json", action="store_true", help="Output machine-readable JSON")

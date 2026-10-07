@@ -1,9 +1,22 @@
-"""Walk Cycle Judge: validates alternating foot cadence and catches hops, skips, and jumping jacks."""
+"""Walk Cycle Judge: validates alternating foot cadence (legs) or a steady, turning
+wheel / tread base (wheels, treads); catches hops, skips, jumping jacks and a
+wandering ground row.
 
+``locomotion``:
+- ``legs``   -- two side-by-side feet must alternate lifting (front/back/diagonal walks).
+- ``wheels`` -- no cadence; the ground row must hold (+-1), the wheel/hub bounding
+  box in the bottom band must keep its width and x-centre, and the wheel must
+  actually change between frames (a frozen wheel is not a roll).
+- ``treads`` -- same as wheels (the tread band must turn, the base must not bob).
+"""
+
+import statistics
 from pathlib import Path
 from PIL import Image
 
 from .models import GateResult
+
+LOCOMOTION_MODES = ("legs", "wheels", "treads")
 
 
 def _find_feet(image: Image.Image, x_mid: int, band: int) -> tuple[int | None, int | None, float | None, float | None]:
@@ -25,12 +38,107 @@ def _find_feet(image: Image.Image, x_mid: int, band: int) -> tuple[int | None, i
     return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
+def _base_band(image: Image.Image, band: int) -> tuple[tuple[int, int, int, int] | None, Image.Image | None]:
+    """Bounding box and crop of the bottom ``band`` rows of the drawn sprite (the wheel / treads)."""
+    alpha = image.getchannel("A").point(lambda v: 255 if v > 127 else 0)
+    box = alpha.getbbox()
+    if not box:
+        return None, None
+    y0 = max(box[1], box[3] - band)
+    strip = alpha.crop((0, y0, image.width, box[3]))
+    sb = strip.getbbox()
+    if sb is None:
+        return None, None
+    bbox = (sb[0], y0 + sb[1], sb[2], y0 + sb[3])
+    return bbox, image.crop(bbox)
+
+
+def _check_rolling_base(frames: list[Image.Image], locomotion: str, band: int, lift_thresh: int) -> GateResult:
+    """wheels / treads: ground steadiness + hub/wheel bbox stability + the base must turn."""
+    ground_rows: list[int] = []
+    widths: list[int] = []
+    centers: list[float] = []
+    crops: list[Image.Image] = []
+    frame_stats = []
+    for i, frame in enumerate(frames):
+        bbox, crop = _base_band(frame, band)
+        if bbox is None or crop is None:
+            continue
+        ground_rows.append(bbox[3] - 1)
+        widths.append(bbox[2] - bbox[0])
+        centers.append((bbox[0] + bbox[2]) / 2.0)
+        crops.append(crop)
+        frame_stats.append({"frame": i, "ground_row": bbox[3] - 1, "base_width": bbox[2] - bbox[0],
+                            "base_center_x": round((bbox[0] + bbox[2]) / 2.0, 1)})
+    if not ground_rows:
+        return GateResult(
+            name="walk_mechanics", passed=False, score=0.0,
+            summary=f"Failed to locate the {locomotion} base across frames",
+            errors=["Could not detect a drawn base band"], metrics={"locomotion": locomotion},
+        )
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    ground_med = max(ground_rows)  # the lowest contact row is the ground
+    bob = [i for i, g in enumerate(ground_rows) if abs(g - ground_med) > 1]
+    if max(ground_rows) - min(ground_rows) > 1:
+        bob = bob or [i for i, g in enumerate(ground_rows) if g != ground_med]
+        errors.append(f"Ground row wanders > 1px in frame(s) {bob} (rows {[ground_rows[i] for i in bob]} vs ground {ground_med}): a {locomotion} base must not bob")
+    hops = [i for i, g in enumerate(ground_rows) if ground_med - g > lift_thresh]
+    if hops and not bob:
+        errors.append(f"Base leaves the ground in frame(s) {hops}")
+
+    width_med = statistics.median(widths)
+    width_off = [i for i, w in enumerate(widths) if abs(w - width_med) > 2]
+    if width_off:
+        errors.append(f"Wheel/hub width changes > 2px in frame(s) {width_off} ({[widths[i] for i in width_off]} vs median {width_med:.0f}px)")
+    center_med = statistics.median(centers)
+    center_off = [i for i, c in enumerate(centers) if abs(c - center_med) > 1.5]
+    if center_off:
+        errors.append(f"Wheel/hub x-centre drifts > 1.5px in frame(s) {center_off}")
+
+    # The base must turn: at least some pixels in the band change between consecutive frames.
+    static_steps = []
+    for i in range(len(crops)):
+        a, b = crops[i], crops[(i + 1) % len(crops)]
+        if a.size == b.size and list(a.getdata()) == list(b.getdata()):
+            static_steps.append(i)
+    if len(crops) >= 2 and len(static_steps) == len(crops):
+        warnings.append(f"The {locomotion} band never changes between frames: the base does not visibly turn")
+    elif static_steps:
+        warnings.append(f"The {locomotion} band is frozen across step(s) {static_steps}")
+
+    passed = not errors
+    score = 1.0 if passed else max(0.0, 1.0 - 0.3 * len(errors))
+    summary = (
+        f"Steady {locomotion}: ground row {ground_med} held, base {width_med:.0f}px wide and centred in every frame"
+        if passed else f"Unsteady {locomotion}: {errors[0]}"
+    )
+    return GateResult(
+        name="walk_mechanics", passed=passed, score=score, summary=summary, errors=errors, warnings=warnings,
+        metrics={
+            "locomotion": locomotion,
+            "ground_row": ground_med,
+            "ground_rows": ground_rows,
+            "bob_frames": bob,
+            "base_widths": widths,
+            "base_centers": [round(c, 1) for c in centers],
+            "static_steps": static_steps,
+        },
+        details={"frame_base": frame_stats},
+    )
+
+
 def check_walk_cycle(
     frames: list[Image.Image],
     lift_thresh: int = 2,
     band: int = 16,
+    locomotion: str = "legs",
 ) -> GateResult:
-    """Validate alternating foot biomechanics for front/back (and diagonal) walk cycles."""
+    """Validate walk biomechanics: alternating feet (legs) or a steady turning base (wheels/treads)."""
+    locomotion = (locomotion or "legs").lower()
+    if locomotion not in LOCOMOTION_MODES:
+        raise ValueError(f"unknown locomotion {locomotion!r}; expected one of {LOCOMOTION_MODES}")
     if len(frames) < 3:
         return GateResult(
             name="walk_mechanics",
@@ -38,7 +146,10 @@ def check_walk_cycle(
             score=0.0,
             summary="Walk cycle requires at least 3 frames",
             errors=["Insufficient frames for walk cycle analysis"],
+            metrics={"locomotion": locomotion},
         )
+    if locomotion in ("wheels", "treads"):
+        return _check_rolling_base(frames, locomotion, band, lift_thresh)
 
     # Establish x midpoint from the first frame's silhouette
     first_box = frames[0].getchannel("A").getbbox()
@@ -123,6 +234,7 @@ def check_walk_cycle(
         summary=summary,
         errors=errors,
         metrics={
+            "locomotion": locomotion,
             "ground_row": ground_row,
             "max_lift_left": max_diff,
             "max_lift_right": -min_diff,

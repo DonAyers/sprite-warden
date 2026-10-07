@@ -12,7 +12,8 @@ from .walk import check_walk_cycle
 from .loop import check_loop_smoothness, check_gif_timing, drop_loop_stalls
 from .start_image import check_start_image, SIZE_TIERS
 from .views import check_direction_set, load_direction_frames, GAME_ORDER
-from .vision import VisionJudge, VisionObservation, OrchestratedVerdict
+from .vision import VisionJudge, VisionObservation, OrchestratedVerdict, ReferenceComparison, reference_gate
+from .walk import LOCOMOTION_MODES
 
 __all__ = [
     "GateResult",
@@ -20,6 +21,9 @@ __all__ = [
     "AnimationScorecard",
     "VisionObservation",
     "OrchestratedVerdict",
+    "ReferenceComparison",
+    "reference_gate",
+    "LOCOMOTION_MODES",
     "VisionJudge",
     "check_pixel_grid",
     "check_palette",
@@ -150,8 +154,14 @@ def evaluate_animation(
     is_walk: bool = False,
     palette_source: str | Path | list[str] | None = None,
     ratio: float = 1.8,
+    locomotion: str = "legs",
 ) -> AnimationScorecard:
-    """Run all verification gates on an animation sequence."""
+    """Run all verification gates on an animation sequence.
+
+    ``locomotion`` (legs | wheels | treads) selects the walk gate's mode when ``is_walk``:
+    legs check alternating feet; wheels/treads check a steady ground row and a stable,
+    turning base instead of cadence.
+    """
     if isinstance(frames_or_sheet, (str, Path)):
         p = Path(frames_or_sheet)
         if p.is_dir():
@@ -221,10 +231,13 @@ def evaluate_animation(
 
     # 5. Optional walk cycle gate
     if is_walk:
-        walk_gate = check_walk_cycle(frames)
+        walk_gate = check_walk_cycle(frames, locomotion=locomotion)
         gates.append(walk_gate)
         if not walk_gate.passed:
-            suggested_actions.append("Adjust walk stride so left and right feet alternate lift height")
+            if locomotion == "legs":
+                suggested_actions.append("Adjust walk stride so left and right feet alternate lift height")
+            else:
+                suggested_actions.append(f"Pin the {locomotion} base: same ground row and hub box in every frame, only the tread/rim turns")
 
     overall_passed = all(g.passed for g in gates)
     avg_score = round(sum(g.score for g in gates) / len(gates), 3)
