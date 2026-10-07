@@ -55,6 +55,8 @@ Use it to:
 3. Formulate optimal generation recipes with Jev and OpenRouter Fusion (`route_generation`).
 4. Validate pixel art stills against mixels, palette, and clipping (`judge_still`).
 5. Validate animations for temporal specks, spikes, and loop stutter (`judge_animation`).
+5b. Gate an anchor before deriving anything from it (`judge_still` with start_image=true) and a
+   direction set before animating it (`judge_direction_set`).
 6. Reduce any artwork to a pixel palette render, AI-refined on request (`pixelize_image`).
 7. Open sprites and sheets in Aseprite for visual inspection (`open_in_aseprite`).
 8. Read each provider's documented recipe before generating (`get_recipe`, resource `spritewarden://recipes`):
@@ -262,6 +264,26 @@ def judge_still(
         )
         out["orchestrated_verdict"] = verdict.model_dump()
     return out
+
+
+@mcp.tool()
+def judge_direction_set(
+    source_path: Annotated[str, Field(description="Folder of <facing>.png files (south.png, down_right.png, ...) or a strip PNG in game order (down, down_right, right, up_right, up, up_left, left, down_left)")],
+    cell_size: Annotated[int | None, Field(description="Cell size when the source is a strip (default: its height when it is N square cells)")] = None,
+    anchor_path: Annotated[str | None, Field(description="Anchor image to compare against (default: the south view)")] = None,
+    palette: Annotated[str | None, Field(description="Target palette to check, or null to skip")] = "luap-40",
+    character_id: Annotated[str | None, Field(description="CharacterIdentity slug; sided marker features (e.g. 'left hand wrench' with marker_hex) enable the tool-side check")] = None,
+) -> dict:
+    """Cross-view gate for a direction set: same ground row (+-1), drawn height (+-2px), opaque area (+-20%), equal component count (extra parts are named), tool side per facing, palette."""
+    from PIL import Image
+
+    from ..judge import check_direction_set, load_direction_frames
+
+    identity = get_catalog().get_identity(character_id) if character_id else None
+    frames = load_direction_frames(source_path, cell=cell_size)
+    anchor = Image.open(anchor_path).convert("RGBA") if anchor_path else None
+    gate = check_direction_set(frames, anchor=anchor, identity=identity, palette=palette)
+    return {"source": source_path, "views": list(frames), **gate.model_dump()}
 
 
 @mcp.tool()

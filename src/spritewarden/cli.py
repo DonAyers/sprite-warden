@@ -249,6 +249,56 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
     return 0 if (verdict.passed if verdict else card.passed) else 1
 
 
+def cmd_judge_views(args: argparse.Namespace) -> int:
+    from PIL import Image
+
+    from .judge import check_direction_set, load_direction_frames
+
+    identity = _load_identity(getattr(args, "char_id", None))
+    try:
+        frames = load_direction_frames(args.source, cell=args.cell)
+    except Exception as e:  # noqa: BLE001 - reported as a CLI failure
+        console.print(f"[bold red]Could not load views:[/] {e}")
+        return 1
+    anchor = Image.open(args.anchor).convert("RGBA") if args.anchor else None
+    gate = check_direction_set(
+        frames,
+        anchor=anchor,
+        identity=identity,
+        palette=None if args.no_palette else args.palette,
+        ground_tolerance=args.ground_tolerance,
+        height_tolerance=args.height_tolerance,
+        area_tolerance=args.area_tolerance,
+    )
+
+    if args.json:
+        print(gate.model_dump_json(indent=2))
+        return 0 if gate.passed else 1
+
+    status_style = "bold green" if gate.passed else "bold red"
+    console.print(f"[{status_style}]Direction Set: {'PASSED' if gate.passed else 'FAILED'}[/] - {args.source} ({len(frames)} views, score {gate.score:.2f})")
+    console.print(f"Summary: {escape(gate.summary)}\n")
+    table = Table(title="Views vs anchor", show_header=True)
+    table.add_column("Facing", style="cyan")
+    table.add_column("Ground", justify="right")
+    table.add_column("Height", justify="right")
+    table.add_column("Opaque", justify="right")
+    table.add_column("Parts", justify="right")
+    anchor_m = gate.metrics.get("anchor", {})
+    for facing, m in gate.metrics.get("views", {}).items():
+        table.add_row(facing, str(m["ground_row"]), str(m["height"]), str(m["opaque"]), str(m["components"]))
+    if anchor_m:
+        table.add_row(f"[dim]anchor ({anchor_m.get('source')})[/]", str(anchor_m.get("ground_row")), str(anchor_m.get("height")), str(anchor_m.get("opaque")), str(anchor_m.get("components")))
+    console.print(table)
+    console.print("\n[bold]Checks:[/]")
+    for name, c in gate.details.get("checks", {}).items():
+        mark = "[green]ok[/]" if c["passed"] else ("[dim]skip[/]" if c["passed"] is None else "[red]FAIL[/]")
+        console.print(f" {mark:>14} {name}: {escape(str(c['detail']))}")
+    for wmsg in gate.warnings:
+        console.print(f"   [yellow]warning:[/] {escape(wmsg)}")
+    return 0 if gate.passed else 1
+
+
 def cmd_judge_anim(args: argparse.Namespace) -> int:
     card = evaluate_animation(
         frames_or_sheet=args.path,
@@ -621,6 +671,20 @@ def main() -> None:
     p_still.add_argument("--perspective", default="low top-down", help="Expected perspective")
     p_still.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_still.set_defaults(func=cmd_judge_still)
+
+    # judge views (direction set)
+    p_views = subparsers.add_parser("judge-views", help="Cross-view gate: compare the 4-8 facings of a direction set against an anchor")
+    p_views.add_argument("source", help="Folder of <facing>.png files (south.png, down_right.png, ...) or a strip in game order")
+    p_views.add_argument("--cell", type=int, help="Cell size when the source is a strip (default: strip height when it is N square cells)")
+    p_views.add_argument("--anchor", help="Anchor image (default: the south view)")
+    p_views.add_argument("--palette", default="luap-40", help="Target palette name or file")
+    p_views.add_argument("--no-palette", action="store_true", help="Skip the palette check")
+    p_views.add_argument("--char-id", help="CharacterIdentity slug: sided marker features enable the tool-side check")
+    p_views.add_argument("--ground-tolerance", type=int, default=1, help="Allowed ground-row difference in px (default 1)")
+    p_views.add_argument("--height-tolerance", type=int, default=2, help="Allowed drawn-height difference in px (default 2)")
+    p_views.add_argument("--area-tolerance", type=float, default=0.20, help="Allowed opaque-area ratio difference (default 0.20)")
+    p_views.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_views.set_defaults(func=cmd_judge_views)
 
     # judge anim
     p_anim = subparsers.add_parser("judge-anim", help="Evaluate animation (specks, spikes, walk cadence, loop wrap)")

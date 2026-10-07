@@ -11,6 +11,7 @@ from .animation import check_animation_anomalies
 from .walk import check_walk_cycle
 from .loop import check_loop_smoothness, check_gif_timing, drop_loop_stalls
 from .start_image import check_start_image, SIZE_TIERS
+from .views import check_direction_set, load_direction_frames, GAME_ORDER
 from .vision import VisionJudge, VisionObservation, OrchestratedVerdict
 
 __all__ = [
@@ -32,6 +33,9 @@ __all__ = [
     "check_gif_timing",
     "check_start_image",
     "SIZE_TIERS",
+    "check_direction_set",
+    "load_direction_frames",
+    "GAME_ORDER",
     "drop_loop_stalls",
     "evaluate_still",
     "evaluate_animation",
