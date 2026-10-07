@@ -776,6 +776,47 @@ def cmd_sheet(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recipe_tips(args: argparse.Namespace, reg) -> int:
+    """`warden recipes --export-tips / --publish-tips / --mark-tips-exported`: the registry as tipshare tips."""
+    from .learning.db import LearningDB
+    from .learning.recipe_tips import TIPSHARE_CMD_ENV, build_recipe_tips, mark_exported, publish_tips
+
+    tips = build_recipe_tips(topic=args.topic)
+    if args.provider:
+        canon = reg.canonical_provider(args.provider)
+        tips = [t for t in tips if t["export_key"].split(":")[1] == canon]
+    if args.export_tips:
+        out_path = Path(args.export_tips)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(tips, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    db = LearningDB()
+    if args.mark_tips_exported:
+        count = mark_exported(tips, db)
+        report = [{"title": t["title"], "export_key": t["export_key"], "action": "marked_exported"} for t in tips]
+    else:
+        try:
+            report = publish_tips(tips, db, dry_run=not args.publish_tips, include_exported=args.all_tips)
+        except ValueError as exc:
+            console.print(f"[bold red]Not published:[/] {escape(str(exc))}")
+            return 1
+        count = sum(1 for r in report if r["action"] == "published")
+    failed = any(r["action"] == "error" for r in report)
+    if args.json:
+        print(json.dumps({"tips": len(tips), "file": args.export_tips, "dry_run": not args.publish_tips,
+                          "report": report}, indent=2))
+        return 1 if failed else 0
+    if args.export_tips:
+        console.print(f"[bold green]{len(tips)} tip payload(s)[/] written to {args.export_tips} (topic {args.topic})")
+    for r in report:
+        extra = f" -> tip {r['tip_ref']}" if r.get("tip_ref") else (f": {r['error']}" if r.get("error") else "")
+        console.print(f" • [cyan]{r['action']}[/] {escape(r['title'])}{escape(extra)}")
+    if not args.publish_tips and not args.mark_tips_exported:
+        console.print(f"[dim]Dry run: nothing was sent. --publish-tips publishes through the tipshare MCP server in "
+                      f"{TIPSHARE_CMD_ENV} (searching first, skipping titles that exist); --mark-tips-exported records "
+                      f"them as already published by hand.[/]")
+    return 1 if failed else 0
+
+
 def cmd_recipes(args: argparse.Namespace) -> int:
     from .router.recipes import registry, registry_json
 
@@ -787,6 +828,8 @@ def cmd_recipes(args: argparse.Namespace) -> int:
         ops = ", ".join(r.operation for r in reg.select(args.provider))
         console.print(f"[bold red]Unknown operation:[/] {args.operation} (known for {args.provider}: {ops})")
         return 1
+    if args.export_tips or args.publish_tips or args.mark_tips_exported:
+        return _recipe_tips(args, reg)
     if args.json:
         print(registry_json(args.provider, args.operation))
         return 0
@@ -1082,6 +1125,16 @@ def main(argv: list[str] | None = None) -> None:
     p_rec = subparsers.add_parser("recipes", help="Print the per-provider recipe registry (start-image rules, limits, gates)")
     p_rec.add_argument("provider", nargs="?", help="pixellab, spritefusion, retrodiffusion, spritecook, openrouter_image")
     p_rec.add_argument("operation", nargs="?", help="Operation name or alias, e.g. direction-set, rotate, create_character_v3")
+    p_rec.add_argument("--export-tips", metavar="OUT.json",
+                       help="Write one tipshare tip payload per provider (title, summary, problem, solution, gotchas, "
+                            "topic_slug), generated from the registry; reports a dry run of publishing them")
+    p_rec.add_argument("--publish-tips", action="store_true",
+                       help="Publish the tips through the tipshare MCP stdio server in SPRITEWARDEN_TIPSHARE_CMD "
+                            "(searches first, skips titles that exist, records what was sent). Default is a dry run")
+    p_rec.add_argument("--mark-tips-exported", action="store_true",
+                       help="Record the tips as already published (by hand) without sending anything")
+    p_rec.add_argument("--all-tips", action="store_true", help="Include tips already recorded as exported")
+    p_rec.add_argument("--topic", default="godot-pixel-art", help="Tipshare topic slug for the tips")
     p_rec.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_rec.set_defaults(func=cmd_recipes)
 

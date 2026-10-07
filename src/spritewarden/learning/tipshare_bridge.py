@@ -24,6 +24,7 @@ def export_tips(
             continue
         payloads.append(
             {
+                "export_key": strategy.id,
                 "topic_slug": topic,
                 "title": strategy.what,
                 "summary": strategy.why,

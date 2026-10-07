@@ -267,7 +267,30 @@ def cmd_export_tips(args: argparse.Namespace) -> int:
     from .tipshare_bridge import export_tips
 
     db = LearningDB()
-    payloads = export_tips(db, topic=args.topic, mark=args.mark, include_exported=args.all)
+    payloads = export_tips(db, topic=args.topic, mark=args.mark and not args.publish, include_exported=args.all)
+    if getattr(args, "recipes", False):
+        from .recipe_tips import build_recipe_tips
+
+        payloads = payloads + build_recipe_tips(topic=args.topic)
+    if getattr(args, "publish", False) or getattr(args, "dry_run", False):
+        # Through the tipshare MCP stdio server: search first, skip existing titles, record what was sent.
+        from .recipe_tips import publish_tips
+
+        try:
+            report = publish_tips(payloads, db, dry_run=not args.publish, include_exported=args.all)
+        except ValueError as exc:
+            console.print(f"[bold red]Not published:[/] {escape(str(exc))}")
+            return 1
+        failed = any(r["action"] == "error" for r in report)
+        if args.json:
+            _emit(args, {"count": len(payloads), "dry_run": not args.publish, "report": report})
+            return 1 if failed else 0
+        for r in report:
+            extra = f" -> tip {r['tip_ref']}" if r.get("tip_ref") else (f": {r['error']}" if r.get("error") else "")
+            console.print(f" • [cyan]{r['action']}[/] {escape(r['title'])}{escape(extra)}")
+        if not args.publish:
+            console.print("[dim]Dry run: nothing was sent (--publish sends).[/]")
+        return 1 if failed else 0
     if args.json:
         _emit(args, {"count": len(payloads), "tips": payloads})
         return 0
@@ -417,6 +440,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     pt.add_argument("--topic", default="godot-pixel-art")
     pt.add_argument("--mark", action="store_true", help="Record these as exported")
     pt.add_argument("--all", action="store_true", help="Include already-exported strategies")
+    pt.add_argument("--recipes", action="store_true", help="Also include one tip per provider generated from the recipe registry")
+    pt.add_argument("--publish", action="store_true",
+                    help="Publish through the tipshare MCP stdio server in SPRITEWARDEN_TIPSHARE_CMD (searches first, "
+                         "skips titles that exist, records what was sent in tip_exports)")
+    pt.add_argument("--dry-run", action="store_true", help="Report what --publish would do without sending anything")
     pt.add_argument("--json", action="store_true")
     pt.set_defaults(func=cmd_export_tips)
 
