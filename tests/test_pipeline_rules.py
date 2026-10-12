@@ -141,6 +141,9 @@ def test_entity_providers_animate_through_their_character_id(tmp_path):
     # a provider without a character entity has nothing to record
     write_record(bot / "anchor.png", {"start_image": True})
     _pipeline(bot, animation_provider="retrodiffusion")
+    # Route revision invalidates the prior evidence; refresh it for the newly recorded provider.
+    assert check_call("Bash", _bash(RD_WALK.format("art/bot/anchor.png")), tmp_path).decision == "deny"
+    write_record(bot / "anchor.png", {"start_image": True})
     assert check_call("Bash", _bash(RD_WALK.format("art/bot/anchor.png")), tmp_path).decision == "allow"
 
 

@@ -1,0 +1,57 @@
+.review-console { max-width: 1500px; margin: auto; padding: 26px 24px 60px; }
+.review-console header, .controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.review-console header { justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.review-console h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 17px;
+  letter-spacing: .02em;
+}
+.review-console header a { font-family: var(--font-mono); font-size: 12px; }
+.controls { margin: 18px 0; }
+.review-console label { display: inline-flex; gap: 8px; align-items: center; color: var(--paper-dim); font-size: 12px; font-family: var(--font-mono); }
+.review-console label select, .review-console label input { color: var(--paper); }
+.review-console input[type="number"] { width: 78px; }
+.review-console select { max-width: 400px; }
+.comparisons { display: flex; gap: 20px; overflow: auto; align-items: flex-start; }
+.comparisons figure { margin: 0; min-width: 140px; }
+.comparisons figcaption {
+  font-family: var(--font-display);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--signal);
+}
+.comparisons canvas {
+  image-rendering: pixelated;
+  margin-top: 10px;
+  border: 1px solid var(--line-strong);
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, .5);
+}
+.review-console pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 440px;
+  overflow: auto;
+  padding: 14px;
+  background: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: #cfc2ab;
+}
+.review-console form { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 18px 0; }
+.review-console form h2 {
+  width: 100%;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: .02em;
+}
+.review-console textarea { width: 350px; min-height: 65px; }
+.review-console details { margin: 18px 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; background: var(--ink-1); }
+.review-console summary { cursor: pointer; font-family: var(--font-mono); font-size: 12px; color: var(--paper-dim); }
+.review-console summary:hover { color: var(--signal); }
+.review-console p { color: var(--paper-dim); }
+#message { color: var(--warn); font-family: var(--font-mono); }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .6; }

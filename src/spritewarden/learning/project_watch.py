@@ -11,7 +11,7 @@ from pathlib import Path
 from .db import LearningDB
 from .models import Source
 
-DEFAULT_PATTERNS = ["**/*.tres", "**/*.hex", "**/*.pal", "**/palette*.json", "**/.spritewarden.json"]
+DEFAULT_PATTERNS = ["**/*.tres", "**/*.hex", "**/*.pal", "**/palette*.json", "**/.spritewarden.json", "**/spritewarden.json", "**/pipeline.json", "**/AGENTS.md", "docs/**/*.md", "**/notes*.md"]
 
 
 def register_project(
@@ -27,10 +27,12 @@ def register_project(
         raise FileNotFoundError(f"Project root not found: {root}")
     globs = patterns or DEFAULT_PATTERNS
     count = 0
+    seen = set()
     for pattern in globs:
         for path in sorted(root_path.glob(pattern)):
-            if not path.is_file():
+            if not path.is_file() or path.resolve() in seen:
                 continue
+            seen.add(path.resolve())
             rel = path.relative_to(root_path).as_posix()
             source = Source(
                 id=f"{provider}:{rel}",

@@ -64,6 +64,8 @@ def _get_sprite_cook_key() -> str:
 class SpriteCookDriver(BaseGeneratorDriver):
     """Driver for the SpriteCook REST API (still generation, animation, import, credits)."""
 
+    provider_name = "spritecook"
+
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
         self.api_key = api_key or _get_sprite_cook_key()
         self.base_url = (
@@ -76,9 +78,52 @@ class SpriteCookDriver(BaseGeneratorDriver):
     def is_configured(self) -> bool:
         return bool(self.api_key)
 
+    def fetch_asset(self, asset_id: str, output_dir: str | Path, **params: Any) -> GenerationOutput:
+        """Download a canonical SpriteCook asset by id (``GET /v1/api/assets/<id>``) and palette-snap it."""
+        if not self.is_configured():
+            return GenerationOutput(success=False, provider="spritecook", error="SPRITE_COOK_API_KEY is not set")
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "User-Agent": "spritewarden/spritecook",
+        }
+        palette = str(params.get("palette") or "luap-40")
+        try:
+            with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+                resp = client.get(f"{self.base_url}/v1/api/assets/{asset_id}", headers=headers)
+                if resp.status_code != 200:
+                    return GenerationOutput(
+                        success=False,
+                        provider="spritecook",
+                        error=_http_error("SpriteCook asset fetch", resp),
+                    )
+                payload = _as_dict(resp)
+                assets = _extract_assets(payload) or [payload]
+            written = self._download_assets(assets, out_dir, f"spritecook_{asset_id}", palette, prefer_sheet=True)
+            if not written:
+                return GenerationOutput(
+                    success=False,
+                    provider="spritecook",
+                    error="SpriteCook asset had no downloadable URL",
+                    metadata={"response": _trim(payload)},
+                )
+            return GenerationOutput(
+                success=True,
+                provider="spritecook",
+                output_files=written,
+                metadata={"asset_ids": [asset_id], "fetched": True},
+            )
+        except Exception as e:  # noqa: BLE001 - surfaced as a structured failure
+            return GenerationOutput(success=False, provider="spritecook", error=f"SpriteCook fetch failed: {e}")
+
     # -- public API ---------------------------------------------------------
 
     def generate(self, recipe: GenerationRecipe, output_dir: str | Path) -> GenerationOutput:
+        from .contracts import capability_status
+        if not capability_status("spritecook", recipe.operation)["executable"]:
+            return GenerationOutput(success=False, provider="spritecook", error=f"Unsupported native workflow: {recipe.operation}")
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,15 +147,35 @@ class SpriteCookDriver(BaseGeneratorDriver):
 
     # -- stills -------------------------------------------------------------
 
+    def build_request(self, recipe: GenerationRecipe, *, asset_id: str | None = None) -> dict[str, Any]:
+        """Build the actual REST body without network access; imports happen separately."""
+        from .contracts import capability_status
+        capability = capability_status("spritecook", recipe.operation)
+        if not capability["executable"]:
+            raise ValueError(f"Unsupported native workflow: {recipe.operation}")
+        if capability["operation"] == "animate_game_art":
+            source_id = asset_id or recipe.params.get("asset_id")
+            if not source_id:
+                raise ValueError("animation requires source asset_id (or import a local source)")
+            frames = int(recipe.params.get("output_frames", recipe.params.get("frames", 8)))
+            if frames < 2 or frames > 16 or frames % 2:
+                raise ValueError("output_frames must be even, from 2 to 16")
+            body = {"asset_id": source_id, "prompt": recipe.prompt, "output_frames": frames,
+                    "output_format": recipe.params.get("output_format", "spritesheet")}
+            if body["output_format"] != "spritesheet":
+                raise ValueError("only spritesheet outputs have executable post-gates")
+            self._apply_palette(body, recipe, palette_size=True)
+            self._copy_optional(body, recipe, "pixel", "negative_prompt", "matte_color", "removebg", "model", "auto_enhance_prompt")
+        else:
+            if capability["operation"] == "edit" and not recipe.params.get("edit_asset_id"):
+                raise ValueError("edit requires edit_asset_id")
+            body = {"prompt": recipe.prompt, "width": recipe.size or 64, "height": recipe.size or 64, "pixel": True}
+            body.update(self._common_params(recipe))
+            self._apply_palette(body, recipe)
+        return body
+
     def _generate_still(self, recipe: GenerationRecipe, out_dir: Path) -> GenerationOutput:
-        body: dict[str, Any] = {
-            "prompt": recipe.prompt,
-            "width": recipe.size or 64,
-            "height": recipe.size or 64,
-            "pixel": True,
-        }
-        body.update(self._common_params(recipe))
-        self._apply_palette(body, recipe)
+        body = self.build_request(recipe)
 
         ok, payload, error = self._post_sync("/v1/api/generate-sync", "/v1/api/generate", body)
         if not ok:
@@ -142,16 +207,7 @@ class SpriteCookDriver(BaseGeneratorDriver):
                 ),
             )
 
-        body: dict[str, Any] = {
-            "asset_id": asset_id,
-            "prompt": recipe.prompt,
-            "output_frames": int(recipe.params.get("frames", recipe.params.get("output_frames", 8))),
-            "output_format": recipe.params.get("output_format", "spritesheet"),
-        }
-        if recipe.params.get("pixel") is not None:
-            body["pixel"] = bool(recipe.params["pixel"])
-        self._apply_palette(body, recipe, palette_size=True)
-        self._copy_optional(body, recipe, "negative_prompt", "matte_color", "removebg")
+        body = self.build_request(recipe, asset_id=asset_id)
 
         ok, payload, error = self._post_sync("/v1/api/animate-sync", "/v1/api/animate", body)
         if not ok:
@@ -253,14 +309,13 @@ class SpriteCookDriver(BaseGeneratorDriver):
         if asset_id:
             return str(asset_id)
 
-        raw_inputs = recipe.params.get("inputs") or recipe.params.get("reference_image")
-        if not raw_inputs:
+        from .contracts import source_paths
+        paths = source_paths(recipe.params)
+        if not paths:
             return None
-        if isinstance(raw_inputs, (str, Path)):
-            raw_inputs = [raw_inputs]
-        first = Path(str(raw_inputs[0]))
-        if not first.exists():
-            return None
+        if len(paths) != 1:
+            raise ValueError("animation requires exactly one source image")
+        first = paths[0]
         headers = {"Authorization": f"Bearer {self.api_key}", "User-Agent": "spritewarden/spritecook"}
         with httpx.Client(timeout=120.0) as client:
             return self._import_asset(client, headers, first)
@@ -372,12 +427,21 @@ class SpriteCookDriver(BaseGeneratorDriver):
         return body
 
     def _apply_palette(self, body: dict[str, Any], recipe: GenerationRecipe, palette_size: bool = False) -> None:
-        """Convert the recipe palette into SpriteCook's ``colors`` hex list (max 64)."""
+        """Apply the reviewed palette contract: at most eight color hints."""
+        if "colors" in recipe.params:
+            colors = recipe.params["colors"]
+            if palette_size:
+                if not isinstance(colors, int) or isinstance(colors, bool) or not 1 <= colors <= 8:
+                    raise ValueError("animation colors must be an integer from 1 to 8")
+            elif not isinstance(colors, list) or not 1 <= len(colors) <= 8:
+                raise ValueError("colors must contain between 1 and 8 hex entries")
+            body["colors"] = colors
+            return
         try:
             palette = load_palette(recipe.palette_id)
         except Exception:
             return
-        hexes = list(dict.fromkeys(rgb_to_hex(c) for c in palette))[:64]
+        hexes = list(dict.fromkeys(rgb_to_hex(c) for c in palette))[:8]
         if not hexes:
             return
         if palette_size:

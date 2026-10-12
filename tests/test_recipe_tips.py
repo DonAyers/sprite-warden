@@ -1,10 +1,13 @@
 """Tipshare bridge: recipe tips from the registry, published through a FAKE stdio server only."""
 
 import json
+import hashlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -45,16 +48,25 @@ def server(tmp_path, monkeypatch):
 
 
 def test_one_tip_per_provider_from_the_registry():
+    from spritewarden.enforce.core import load_raw_registry
+    registry = load_raw_registry()
     tips = build_recipe_tips()
-    assert [t["export_key"] for t in tips] == [
-        "recipe:pixellab:v1", "recipe:spritefusion:v1", "recipe:retrodiffusion:v1", "recipe:spritecook:v1",
-        "recipe:openrouter_image:v1",
+    assert [t["applicability"]["provider"] for t in tips] == [
+        "pixellab", "spritefusion", "retrodiffusion", "spritecook", "openrouter_image",
     ]
     for tip in tips:
+        provider = tip["applicability"]["provider"]
+        projection = {"provider": registry["providers"][provider], "pipeline_rules": registry.get("pipeline_rules", []),
+                      "stages": registry.get("stages", {}), "version": registry.get("version", 1)}
+        digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        assert tip["export_key"] == f"recipe:{provider}:{digest}"
+        assert tip["content_hash"] == tip["applicability"]["registry_hash"] == digest
+        assert f"sha256 {digest}" in tip["title"]
+        assert tip["evidence_state"] == "local_policy_not_provider_verified"
         assert REQUIRED <= set(tip) and tip["topic_slug"] == "godot-pixel-art" and tip["author"] == "sprite-warden"
         assert all(isinstance(tip[k], str) and tip[k] for k in ("title", "summary", "problem", "solution"))
         assert isinstance(tip["gotchas"], list) and tip["gotchas"]
-        assert "{" not in tip["solution"]  # no unfilled message placeholders
+        assert not re.search(r"\{(?:count|value|operation|max|of)\}", tip["solution"])  # JSON policy is allowed, unfilled rule placeholders are not
     sc = next(t for t in tips if t["export_key"].startswith("recipe:spritecook"))
     assert sc["title"].startswith("SpriteCook generator recipes:")
     assert "animate_game_art" in sc["solution"] and "matte" in sc["solution"] and "at most 8" in sc["solution"]
@@ -67,12 +79,21 @@ def test_one_tip_per_provider_from_the_registry():
 
 def test_stdio_session_calls_tools(server):
     with StdioSession(server.command, env={"TIPSHARE_AGENT_ID": "sprite-warden"}) as session:
-        assert {t["name"] for t in session.list_tools()} == {"search", "share_tip"}
+        assert {t["name"] for t in session.list_tools()} == {"search", "share_tip", "get_tip"}
         assert session.call_tool("search", {"query": "nothing", "topic_slug": "t"}) == []
         with pytest.raises(McpError):
             session.call_tool("search", {"query": "broken: (query)"})
         with pytest.raises(McpError):
             session.call_tool("no_such_tool", {})
+        with pytest.raises(McpError, match="tip not found"):
+            session.call_tool("get_tip", {"tip_id": "missing"})
+        payload = build_recipe_tips()[0]
+        receipt = session.call_tool("share_tip", {k: payload[k] for k in REQUIRED})
+        assert str(UUID(receipt["uuid"])) == receipt["uuid"]
+        by_id = session.call_tool("get_tip", {"tip_id": receipt["id"]})
+        by_uuid = session.call_tool("get_tip", {"tip_id": receipt["uuid"]})
+        assert by_id == by_uuid
+        assert by_id["uuid"] == receipt["uuid"] and by_id["solution"] == payload["solution"]
     assert server.data()["calls"][0]["agent"] == "sprite-warden"
     with pytest.raises(McpError):
         StdioSession(["definitely-not-a-real-binary-xyz"]).open()
@@ -96,30 +117,65 @@ def test_dry_run_is_the_default_and_sends_nothing(server, tmp_path):
 def test_publish_skips_existing_titles_and_records_exports(server, tmp_path):
     db = LearningDB(tmp_path / "l.db")
     tips = build_recipe_tips()
-    server.seed([{"id": 7, "title": tips[0]["title"].upper(), "topic_slug": "godot-pixel-art"}])  # same title, other case
+    server.seed([{**tips[0], "id": 7, "uuid": "a1111111-1111-4111-8111-111111111111",
+                  "title": tips[0]["title"].upper()}])  # same content and title, other case
 
     report = publish_tips(tips, db, command=server.command, dry_run=False)
     assert [r["action"] for r in report] == ["skipped_existing", "published", "published", "published", "published"]
     sent = server.shared()
     assert len(sent) == 4 and all(c["agent"] == "sprite-warden" for c in sent)
     first = sent[0]["arguments"]
-    assert set(first) <= {"topic_slug", "title", "summary", "problem", "solution", "gotchas", "author"}
+    assert set(first) <= {"topic_slug", "title", "summary", "problem", "solution", "gotchas", "author", "applicability", "evidence_state"}
+    assert first["applicability"] == tips[1]["applicability"]
+    assert first["evidence_state"] == "local_policy_not_provider_verified"
     assert "export_key" not in first and first["title"] == tips[1]["title"]
     # searches use plain words only (the title's punctuation would break full-text search)
     searches = [c["arguments"]["query"] for c in server.data()["calls"] if c["tool"] == "search"]
     assert all(q.replace(" ", "").isalnum() for q in searches)
 
     exports = {e["strategy_id"]: e for e in db.list_tip_exports()}
-    assert set(exports) == {t["export_key"] for t in tips[1:]}
-    assert exports["recipe:spritecook:v1"]["tip_ref"] == report[3]["tip_ref"] and report[3]["tip_ref"].isdigit()
+    assert set(exports) == {t["export_key"] for t in tips}
+    stored = {t["uuid"]: t for t in server.data()["tips"]}
+    for tip, row in zip(tips, report):
+        ref = row["tip_ref"]
+        assert str(UUID(ref)) == ref
+        assert exports[tip["export_key"]]["tip_ref"] == ref
+        assert stored[ref]["solution"] == tip["solution"]
+    assert len([c for c in server.data()["calls"] if c["tool"] == "get_tip"]) == 5
 
-    # a second run sends nothing: recorded exports are skipped, the first tip still exists on the server
+    # a second run sends nothing: all verified receipts, including the existing tip, are recorded
     report = publish_tips(tips, db, command=server.command, dry_run=False)
-    assert [r["action"] for r in report] == ["skipped_exported"] * 4 + ["skipped_existing"]
+    assert [r["action"] for r in report] == ["skipped_exported"] * 5
     assert len(server.shared()) == 4
     # --all re-checks them against the server, which now has every title
     report = publish_tips(tips, db, command=server.command, dry_run=False, include_exported=True)
     assert {r["action"] for r in report} == {"skipped_existing"} and len(server.shared()) == 4
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("override, error", [
+    ({"solution": "conflicting content"}, "conflicting content"),
+    ({"uuid": "7"}, "UUID"),
+])
+def test_existing_tip_requires_content_and_uuid_readback(server, tmp_path, dry_run, override, error):
+    db = LearningDB(tmp_path / "l.db")
+    tip = build_recipe_tips()[0]
+    server.seed([{**tip, "id": 7, "uuid": "a1111111-1111-4111-8111-111111111111", **override}])
+    report = publish_tips([tip], db, command=server.command, dry_run=dry_run)
+    assert report[0]["action"] == "error" and error in report[0]["error"]
+    assert db.list_tip_exports() == [] and server.shared() == []
+    assert [c["tool"] for c in server.data()["calls"]] == ["search", "get_tip"]
+
+
+def test_dry_run_verifies_existing_tip_without_recording(server, tmp_path):
+    db = LearningDB(tmp_path / "l.db")
+    tip = build_recipe_tips()[0]
+    ref = "a1111111-1111-4111-8111-111111111111"
+    server.seed([{**tip, "id": 7, "uuid": ref}])
+    report = publish_tips([tip], db, command=server.command)
+    assert report[0]["action"] == "skipped_existing" and report[0]["tip_ref"] == ref
+    assert db.list_tip_exports() == [] and server.shared() == []
+    assert [c["tool"] for c in server.data()["calls"]] == ["search", "get_tip"]
 
 
 def test_a_failing_tip_is_reported_and_not_recorded(server, tmp_path):
@@ -135,8 +191,12 @@ def test_a_failing_tip_is_reported_and_not_recorded(server, tmp_path):
 def test_mark_exported_and_command_env(tmp_path, monkeypatch):
     db = LearningDB(tmp_path / "l.db")
     tips = build_recipe_tips()
-    assert mark_exported(tips, db) == 5
-    assert [r["action"] for r in publish_tips(tips, db)] == ["skipped_exported"] * 5
+    monkeypatch.delenv(TIPSHARE_CMD_ENV, raising=False)
+    for ref in (None, "7", "a1111111-1111-4111-8111-111111111111"):
+        with pytest.raises(ValueError, match="verified get_tip receipt"):
+            mark_exported(tips, db, tip_ref=ref)
+    assert db.list_tip_exports() == []
+    assert [r["action"] for r in publish_tips(tips, db)] == ["would_publish"] * 5
 
     monkeypatch.setenv(TIPSHARE_CMD_ENV, '["node", "C:/x/tipshare/dist/server.js"]')
     assert tipshare_command() == ["node", "C:/x/tipshare/dist/server.js"]
@@ -180,8 +240,13 @@ def test_recipes_export_tips_cli(server, tmp_path):
     assert [r["action"] for r in json.loads(out.stdout)["report"]] == ["skipped_exported"]
 
     out = _cli(["recipes", "--mark-tips-exported", "--json"], tmp_path)
-    assert {r["action"] for r in json.loads(out.stdout)["report"]} == {"marked_exported"}
+    assert out.returncode == 1 and "verified" in out.stdout + out.stderr
+    assert len(LearningDB(tmp_path / "learning.db").list_tip_exports()) == 1
+    out = _cli(["learn", "export-tips", "--recipes", "--publish", "--json"], tmp_path, server)
+    assert out.returncode == 0, out.stderr + out.stdout
+    assert [r["action"] for r in json.loads(out.stdout)["report"]] == ["skipped_exported"] + ["published"] * 4
+    assert len(server.shared()) == 5
     out = _cli(["learn", "export-tips", "--recipes", "--publish", "--json"], tmp_path, server)
     assert out.returncode == 0, out.stderr + out.stdout
     assert {r["action"] for r in json.loads(out.stdout)["report"]} == {"skipped_exported"}
-    assert len(server.shared()) == 1
+    assert len(server.shared()) == 5

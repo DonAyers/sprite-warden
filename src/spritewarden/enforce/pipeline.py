@@ -58,6 +58,10 @@ def load_pipeline(target: str | Path) -> dict[str, Any]:
 
 def save_pipeline(target: str | Path, data: dict[str, Any]) -> Path:
     path = pipeline_file(target)
+    if path.exists() and '_workflow' in load_pipeline(target):
+        raise ValueError('revisioned pipelines require workflow decisions/promote, not legacy set')
+    if '_workflow' in data:
+        raise ValueError('revisioned state must be created through workflow_state')
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
@@ -102,6 +106,19 @@ def check_pipeline(data: dict[str, Any], cfg: ProjectConfig, where: Path, reg: d
 
     from ..gates.records import passed_gates
 
+    if '_workflow' in data:
+        from ..workflow_state import _readiness
+        state = data['_workflow']
+        for stage in ('anchor', 'views', 'anim'):
+            rid = state['current'].get(stage)
+            if not rid:
+                add('todo', stage, 'No current revision: register, review and explicitly promote a candidate')
+            else:
+                ready = _readiness(cfg.root.resolve(), state, state['revisions'][rid])
+                for reason in ready['reasons']:
+                    add('error', stage, reason)
+        return out
+
     anchor = data.get("anchor")
     if not isinstance(anchor, str) or not anchor.strip():
         add("todo", "anchor", "no anchor recorded: gate the south image with `warden stage anchor <image>` and set anchor=<image>")
@@ -137,6 +154,21 @@ def check_pipeline(data: dict[str, Any], cfg: ProjectConfig, where: Path, reg: d
 def stage_status(data: dict[str, Any], cfg: ProjectConfig) -> dict[str, Any]:
     """Which stages the gate records say are done: ``{"anchor": bool, "views": {...}, "next": str}``."""
     from ..gates.records import passed_gates, review_problem
+
+    if '_workflow' in data:
+        from ..workflow_state import _readiness
+        state = data['_workflow']
+        readiness = {stage: _readiness(cfg.root.resolve(), state, state['revisions'][rid])
+                     for stage, rid in state['current'].items()}
+        anchor_ok = readiness.get('anchor', {}).get('ready', False)
+        views_ok = readiness.get('views', {}).get('ready', False)
+        selected = state['revisions'].get(state['current'].get('views'), {})
+        total = len(selected.get('files', {}))
+        views = {'dir': data.get('views_dir'), 'total': total, 'passed': total if views_ok else 0,
+                 'shown_ready': total if views_ok else 0}
+        nxt = 'review/promote anchor revision' if not anchor_ok else ('review/promote views revision' if not views_ok else 'motion / in game')
+        return {'anchor': anchor_ok, 'views': views, 'views_done': views_ok, 'next': nxt,
+                'readiness': readiness, 'version': state['version']}
 
     anchor_ok = False
     anchor = data.get("anchor")

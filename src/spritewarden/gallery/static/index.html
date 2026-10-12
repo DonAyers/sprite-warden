@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sprite-warden gallery</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">
+        <svg viewBox="0 0 7 7" aria-hidden="true" focusable="false">
+          <path fill="currentColor" fill-rule="evenodd" d="M0 0h7v3H0zM1 3h5v2H1zM2 5h3v1H2zM3 6h1v1H3zM3 1h1v1H3z"/>
+        </svg>
+      </span>
+      <div>
+        <h1>sprite-warden <span class="h1-sub">gallery</span></h1>
+        <p id="summary-line" class="muted">loading&hellip;</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <a class="btn" href="/review">Revision review</a>
+      <input id="search" type="search" placeholder="Search assets&hellip;" autocomplete="off">
+      <button id="refresh" class="btn" title="Reload from the catalog">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="assets">Assets</button>
+    <button class="tab" data-tab="pipelines">Pipelines</button>
+    <button class="tab" data-tab="identities">Identities</button>
+    <button class="tab" data-tab="projects">Projects</button>
+    <button class="tab" data-tab="rejections">Rejections</button>
+    <button class="tab" data-tab="providers">Providers</button>
+  </nav>
+
+  <section id="filters" class="filters">
+    <select id="f-game"><option value="">all games</option></select>
+    <select id="f-character"><option value="">all characters</option></select>
+    <select id="f-category"><option value="">all categories</option></select>
+    <select id="f-type"><option value="">all types</option></select>
+    <select id="f-perspective"><option value="">all perspectives</option></select>
+    <select id="f-provider"><option value="">all providers</option></select>
+    <button id="clear-filters" class="btn ghost">Clear</button>
+  </section>
+
+  <section id="view-settings" class="view-settings">
+    <div class="view-settings-trigger">
+      <button id="view-settings-toggle" class="view-settings-button" type="button" aria-label="Open results view settings" aria-expanded="false" aria-controls="results-settings-panel" title="Results view settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="m19.4 15 .1.1a1.8 1.8 0 0 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3 .9v.2a1.8 1.8 0 0 1-3.6 0v-.2a1.8 1.8 0 0 0-3-.9l-.1.1a1.8 1.8 0 0 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-.9-3h-.2a1.8 1.8 0 0 1 0-3.6h.2a1.8 1.8 0 0 0 .9-3l-.1-.1a1.8 1.8 0 0 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3-.9v-.2a1.8 1.8 0 0 1 3.6 0v.2a1.8 1.8 0 0 0 3 .9l.1-.1a1.8 1.8 0 0 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 .9 3h.2a1.8 1.8 0 0 1 0 3.6h-.2a1.8 1.8 0 0 0-.9 3Z"></path>
+        </svg>
+      </button>
+      <span id="settings-summary" class="settings-summary">4 columns × 6 rows · 24 per page · Fit tile</span>
+    </div>
+    <div id="results-settings-panel" class="view-settings-panel hidden" role="dialog" aria-label="Results view settings">
+      <label>Columns
+        <select id="grid-columns">
+          <option value="2">2</option><option value="3">3</option><option value="4" selected>4</option>
+          <option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option>
+        </select>
+      </label>
+      <label>Rows per page
+        <select id="grid-rows">
+          <option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          <option value="5">5</option><option value="6" selected>6</option><option value="8">8</option>
+          <option value="10">10</option><option value="12">12</option>
+        </select>
+      </label>
+      <div class="view-setting-result"><span>Results per page</span><output id="results-per-page">24</output></div>
+      <label class="check-setting"><input id="match-pixels" type="checkbox"> Match pixel scale</label>
+      <label id="pixel-scale-setting" class="pixel-scale-setting hidden">Pixel zoom
+        <span><input id="pixel-scale" type="range" min="1" max="8" step="1" value="3"><output id="pixel-scale-value">3×</output></span>
+      </label>
+    </div>
+  </section>
+
+  <main>
+    <div id="view-assets" class="view">
+      <div id="asset-grid" class="grid"></div>
+      <div class="pager">
+        <button id="prev-page" class="btn ghost">&larr; Prev</button>
+        <span id="page-label" class="muted"></span>
+        <button id="next-page" class="btn ghost">Next &rarr;</button>
+      </div>
+    </div>
+
+    <div id="view-pipelines" class="view hidden"></div>
+    <div id="view-identities" class="view hidden"></div>
+    <div id="view-projects" class="view hidden"></div>
+    <div id="view-rejections" class="view hidden"></div>
+    <div id="view-providers" class="view hidden"></div>
+  </main>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal-body">
+      <button class="modal-close" data-close="1">&times;</button>
+      <div id="modal-content"></div>
+    </div>
+  </div>
+
+  <div id="image-preview" class="image-preview" role="tooltip" aria-hidden="true"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

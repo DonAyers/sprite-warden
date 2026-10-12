@@ -52,6 +52,11 @@ def report(db: LearningDB | None = None) -> dict:
     tools = db.list_tools()
     budget = db.get_budget(current_period())
 
+    failed = [c for c in db.source_health() if not c["successful"]]
+    if failed:
+        warnings.append(f"{len(failed)} source(s) unreachable/failed; last good revision retained and potentially stale")
+    if not episodes:
+        warnings.append("zero episode capture: generation outcomes are unknown; verify event projection/capture")
     if not sources:
         warnings.append("no sources registered — run `warden learn seed`")
     if never_checked:
@@ -66,7 +71,7 @@ def report(db: LearningDB | None = None) -> dict:
         warnings.append("monthly LLM budget exhausted (background summaries paused)")
 
     return {
-        "sources": {"total": len(sources), "never_checked": len(never_checked), "overdue": len(overdue)},
+        "sources": {"total": len(sources), "never_checked": len(never_checked), "overdue": len(overdue), "failed": len(failed), "checks": db.source_health()},
         "events": {"total": len(events), "new": len(new_events), "significant_new": len(significant)},
         "episodes": {"total": len(episodes), "by_outcome": outcomes},
         "strategies": {"total": len(strategies), "by_status": by_status, "active_without_evidence": len(no_evidence)},

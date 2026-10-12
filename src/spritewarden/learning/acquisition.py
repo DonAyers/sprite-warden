@@ -106,12 +106,19 @@ def check_source(
     if source.kind == "mcp_tools":
         return _check_mcp_source(source, db, mcp_probe_fn)
 
-    result = fetch(source.url, etag=source.etag, last_modified=source.last_modified, fetch_fn=fetch_fn)
+    try:
+        result = fetch(source.url, etag=source.etag, last_modified=source.last_modified, fetch_fn=fetch_fn)
+    except Exception as exc:
+        db.record_source_check(source.id, 0, f"{type(exc).__name__}: {exc}", False)
+        return []
     now = utcnow()
 
-    if result.error:
+    valid_304 = result.status == 304 and source.last_hash is not None
+    success = not result.error and (200 <= result.status < 300 or valid_304)
+    db.record_source_check(source.id, result.status, result.error or (None if success else f"HTTP {result.status}; baseline preserved"), success)
+    if not success:
         return []
-    if result.not_modified:
+    if valid_304:
         db.update_source_fetch_state(source.id, source.etag, source.last_modified, source.last_hash, now)
         return []
 
@@ -184,7 +191,9 @@ def _check_mcp_source(
     except Exception:
         tools = None
     if tools is None:
+        db.record_source_check(source.id, 0, "MCP probe unavailable or unconfigured", False)
         return []
+    db.record_source_check(source.id, 200, successful=True)
 
     normalized = normalize_tools(tools)
     now = utcnow()

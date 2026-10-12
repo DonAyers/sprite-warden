@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 # The stage a judge command checks the OUTPUT of, i.e. the provider to blame in pipeline.json.
-COMMAND_STAGE = {"judge-views": "rotation", "judge-anim": "animation"}
+COMMAND_STAGE = {"judge-views": "rotation", "judge_direction_set": "rotation",
+                 "judge-anim": "animation", "judge_animation": "animation"}
 
 
 def _norm(name: Any) -> str:
@@ -66,6 +67,7 @@ def log_rejection(
     reason: str = "",
     provider: str | None = None,
     log_path: str | Path | None = None,
+    capture: bool = True,
 ) -> Path | None:
     """Append one rejection; returns the log path, or None when it could not be written (never raises)."""
     try:
@@ -83,7 +85,9 @@ def log_rejection(
                 entry[key] = info[key]
         if provider or info.get("provider"):
             entry["provider"] = provider or info["provider"]
-        failures = [{"name": str(f.get("name")), "errors": [str(e) for e in (f.get("errors") or [])[:3]]}
+            entry["provider_basis"] = "explicit" if provider else "pipeline_inference"
+        failures = [{"name": str(f.get("name")), "status": f.get("status", "fail"),
+                     "errors": [str(e) for e in (f.get("errors") or [])[:3]]}
                     for f in (failed or [])]
         if failures:
             entry["failed"] = failures
@@ -93,6 +97,11 @@ def log_rejection(
             from .records import sha256_of
 
             entry["sha256"] = sha256_of(image)
+        if capture:
+            from ..events import emit
+            emit("judgment.completed" if by == "gate" else "human.decision", project_root=info["root"],
+                 payload={**entry, "decision": "rejected" if by != "gate" else None,
+                          "gates": {f["name"]: {**f, "passed": False} for f in failures}})
         path = Path(log_path) if log_path else Path(info["log"])
         # the same file failing the same way twice in a row is one fact, not two
         last = next(iter(read_rejections(path, limit=1)), None)
@@ -102,7 +111,9 @@ def log_rejection(
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return path
-    except Exception:  # noqa: BLE001 - bookkeeping must never fail a judge command
+    except Exception as exc:  # bookkeeping must not hide degraded observability
+        import warnings
+        warnings.warn(f"Rejection capture degraded: {type(exc).__name__}: {exc}", RuntimeWarning, stacklevel=2)
         return None
 
 
@@ -156,7 +167,8 @@ def summarize(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group by (provider, stage, what failed): the repeat offenders first."""
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for entry in entries:
-        names = [f.get("name", "?") for f in entry.get("failed", [])] or ["human: " + str(entry.get("reason", ""))[:60]]
+        names = [("unavailable: " if f.get("status") in {"unavailable", "error"} else "") + f.get("name", "?")
+                 for f in entry.get("failed", [])] or ["human: " + str(entry.get("reason", ""))[:60]]
         for name in names:
             key = (str(entry.get("provider") or "-"), str(entry.get("stage") or "-"), str(name))
             g = groups.setdefault(key, {"provider": key[0], "stage": key[1], "what": key[2], "count": 0,

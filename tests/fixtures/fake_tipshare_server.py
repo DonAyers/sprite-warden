@@ -1,4 +1,4 @@
-"""A fake tipshare MCP stdio server for tests: `search` and `share_tip` over a JSON file.
+"""A fake tipshare MCP stdio server: search, share_tip and get_tip over a JSON file.
 
 The store path comes from env FAKE_TIPSHARE_STORE: {"tips": [...], "calls": [...]}. Nothing
 here talks to the real tipshare knowledge base.
@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 STORE = Path(os.environ["FAKE_TIPSHARE_STORE"])
 
@@ -49,7 +50,7 @@ def main():
                 "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                 "serverInfo": {"name": "fake-tipshare", "version": "0"}}})
         elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [{"name": "search"}, {"name": "share_tip"}]}})
+            send({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [{"name": "search"}, {"name": "share_tip"}, {"name": "get_tip"}]}})
         elif method == "tools/call":
             name = msg["params"]["name"]
             args = msg["params"].get("arguments") or {}
@@ -74,10 +75,19 @@ def main():
                     send({"jsonrpc": "2.0", "id": msg["id"], "result": {
                         "isError": True, "content": [{"type": "text", "text": "rejected: looks like a secret"}]}})
                     continue
-                tip = {"id": 100 + len(data["tips"]), **args}
+                tip = {**args, "id": max([99] + [t["id"] for t in data["tips"]]) + 1, "uuid": str(uuid4())}
                 data["tips"].append(tip)
                 save(data)
-                send({"jsonrpc": "2.0", "id": msg["id"], "result": text({"id": tip["id"], "uuid": f"u-{tip['id']}"})})
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": text({"id": tip["id"], "uuid": tip["uuid"]})})
+            elif name == "get_tip":
+                tip = next((t for t in data["tips"]
+                            if str(args.get("tip_id")) in (str(t["id"]), t.get("uuid"))), None)
+                save(data)
+                if tip is None:
+                    send({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "isError": True, "content": [{"type": "text", "text": "tip not found"}]}})
+                else:
+                    send({"jsonrpc": "2.0", "id": msg["id"], "result": text(tip)})
             else:
                 save(data)
                 send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": f"unknown tool {name}"}})

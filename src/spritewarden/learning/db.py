@@ -22,6 +22,11 @@ from .models import (
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "learning.db"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS source_checks (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL,
+ checked_at TEXT NOT NULL, status INTEGER NOT NULL, error TEXT,
+ successful INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sources (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
@@ -168,6 +173,14 @@ def _u(text: str | None, fallback: Any) -> Any:
         return fallback
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 class LearningDB:
     """Manages sources, snapshots, events, provider tools, episodes, strategies, proposals."""
 
@@ -178,7 +191,7 @@ class LearningDB:
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
@@ -186,6 +199,16 @@ class LearningDB:
     def _init_db(self) -> None:
         with self._get_conn() as conn:
             conn.executescript(SCHEMA)
+
+    def record_source_check(self, source_id, status, error=None, successful=False):
+        from .models import utcnow
+        with self._get_conn() as conn:
+            conn.execute("INSERT INTO source_checks(source_id,checked_at,status,error,successful) VALUES(?,?,?,?,?)",
+                         (source_id, utcnow(), status, error, int(successful)))
+
+    def source_health(self):
+        with self._get_conn() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM source_checks WHERE id IN (SELECT MAX(id) FROM source_checks GROUP BY source_id)")]
 
     # --- Sources ---
 

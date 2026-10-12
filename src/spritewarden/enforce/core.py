@@ -31,6 +31,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .config import ProjectConfig, load_config
 
@@ -359,15 +360,76 @@ class _Manifest:
         return None
 
     def url_file(self, url: str) -> Path | None:
-        """A file registered for this exact URL, or for the SpriteCook asset id inside it."""
+        """Exact registered URL, registered PixelLab rotation, or SpriteCook asset id."""
         for entry in self._entries():
             urls = [entry.get("url"), *(entry.get("urls") or [])] if isinstance(entry.get("urls"), list) else [entry.get("url")]
             if url in urls and entry.get("file"):
                 return self.cfg.resolve(str(entry["file"]))
+        rotation = self._rotation_url_file(url)
+        if rotation is not None:
+            return rotation
         m = _ASSET_URL.search(url)
         if not m:
             return None
         return self.asset_file(m.group(1)) or self.asset_file(m.group(1).lower())
+
+    def _rotation_url_file(self, url: str) -> Path | None:
+        """Map only a provider rotation URL to an existing registered local view.
+
+        No downloads or URL-derived local paths. Queries are signing metadata;
+        every path segment must be literal, and resolved links stay in the folder
+        and project. Generic exact-URL registration remains the first choice.
+        """
+        if not isinstance(url, str) or any(ord(c) <= 32 for c in url):
+            return None
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return None
+        if (parsed.scheme != "https" or parsed.netloc != "backblaze.pixellab.ai"
+                or parsed.fragment or "#" in url):
+            return None
+        match = re.fullmatch(
+            r"/file/pixellab-characters/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)/rotations/([a-z_-]+)\.png",
+            parsed.path,
+        )
+        if match is None:
+            return None
+        aliases = (
+            ("north", "n", "up", "back"), ("south", "s", "down", "front"),
+            ("east", "e", "right"), ("west", "w", "left"),
+            ("north-east", "north_east", "northeast", "ne", "up_right"),
+            ("north-west", "north_west", "northwest", "nw", "up_left"),
+            ("south-east", "south_east", "southeast", "se", "down_right"),
+            ("south-west", "south_west", "southwest", "sw", "down_left"),
+        )
+        facing = match.group(3)
+        names = next((group for group in aliases if facing in group), None)
+        folder = self.character_dir(match.group(2))
+        if names is None or folder is None:
+            return None
+        try:
+            folder = folder.resolve()
+            if not folder.is_dir() or not folder.is_relative_to(self.cfg.root.resolve()):
+                return None
+            # Exact filename first; ambiguous alias fallback cannot borrow evidence.
+            exact = (folder / (facing + ".png")).resolve()
+            if not exact.is_relative_to(folder):
+                return None
+            if exact.is_file():
+                return exact
+            candidates = set()
+            for name in names:
+                candidate = (folder / (name + ".png")).resolve()
+                if not candidate.is_relative_to(folder):
+                    return None
+                if candidate.is_file():
+                    candidates.add(candidate)
+            if len(candidates) == 1:
+                return next(iter(candidates))
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return None
 
     def character_dir(self, character_id: str) -> Path | None:
         chars = self.data.get("pixellab_characters")
@@ -823,6 +885,8 @@ _RULES: dict[str, Callable[..., list[str]]] = {
 
 
 def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]:
+    if call.entry is None:
+        return [f"Unsupported provider/operation contract: {call.provider}/{call.operation}; the spending call cannot be validated."]
     reasons: list[str] = []
     sources, source_reasons = _resolve_sources(call, cfg)
     rules = list(_enforce(call.prov).get("rules", [])) + list(_enforce(call.entry).get("rules", []))
@@ -833,6 +897,8 @@ def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]
         reasons += fn(rule, call, sources, cfg, reg)
     reasons += source_reasons
     stage = _enforce(call.entry).get("stage")
+    if stage and not sources and not source_reasons:
+        reasons.append(f"{call.provider}/{call.operation} requires a source image or registered source identity.")
     needed = accepted_gates((call.entry or {}).get("required_gates_before"), stage)
     for source in sources:
         if source.kind == "views_dir":
@@ -849,6 +915,31 @@ def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]
 
 
 RECIPE_INPUT_KEYS = ("input", "inputs", "input_image", "reference_image", "start_image", "source_image", "image")
+
+
+def recipe_rule_reasons(provider, operation, params, project_root) -> list[str]:
+    """Non-bypassable provider rules, including source-aware matte checks."""
+    reg = load_raw_registry()
+    canon = _canonical_provider(reg, provider)
+    prov = (reg.get("providers") or {}).get(canon, {})
+    name, entry = _find_operation(prov, operation)
+    if entry is None:
+        return [f"Unsupported provider/operation: {provider}/{operation}"]
+    cfg = load_config(project_root)
+    if cfg.error:
+        return [f"gatekeeper error: {cfg.error}"]
+    call = _Call(provider=canon, operation=name, tool=operation, via="recipe", args=params, prov=prov, entry=entry)
+    sources, _ = _resolve_sources(call, cfg)
+    for key in RECIPE_INPUT_KEYS:
+        sources += [_Source(cfg.resolve(v), "file", key) for v in _values(params.get(key))
+                    if not v.startswith(("http:", "https:", "data:"))]
+    reasons = []
+    for rule in list(_enforce(prov).get("rules", [])) + list(_enforce(entry).get("rules", [])):
+        fn = _RULES.get(rule.get("kind"))
+        if fn is None:
+            return [f"gatekeeper error: unknown rule kind {rule.get('kind')}"]
+        reasons += fn(rule, call, sources, cfg, reg)
+    return reasons
 
 
 def recipe_gate_reasons(
@@ -871,12 +962,22 @@ def recipe_gate_reasons(
     canon = _canonical_provider(reg, provider)
     prov = (reg.get("providers") or {}).get(canon, {}) if canon else {}
     name, entry = _find_operation(prov, operation)
-    if entry is None or not entry.get("required_gates_before") or not _enforce(entry).get("stage"):
-        return []
+    if entry is None:
+        return [f"Unsupported provider/operation: {provider}/{operation}"]
     cfg = load_config(project_root)
+    if cfg.error:
+        return [f"gatekeeper error: {cfg.error}"]
     args = dict(params or {})
     call = _Call(provider=canon or provider, operation=name or operation, tool=operation, via="recipe",
                  args=args, prov=prov, entry=entry)
+    rule_reasons = []
+    for rule in list(_enforce(prov).get("rules", [])) + list(_enforce(entry).get("rules", [])):
+        fn = _RULES.get(rule.get("kind"))
+        if fn is None:
+            return [f"gatekeeper error: unknown enforce rule kind {rule.get('kind')!r}"]
+        rule_reasons += fn(rule, call, [], cfg, reg)
+    if not entry.get("required_gates_before") or not _enforce(entry).get("stage"):
+        return rule_reasons
     sources, reasons = _resolve_sources(call, cfg)
     known = {s.path for s in sources}
     for key in RECIPE_INPUT_KEYS:
@@ -889,6 +990,11 @@ def recipe_gate_reasons(
                 sources.append(_Source(path, "file", f"{key}={value}"))
     stage = _enforce(entry).get("stage")
     needed = accepted_gates(entry.get("required_gates_before"), stage)
+    if sources and not any(args.get(k) for k in ("asset_id", "character_id")):
+        reasons = [r for r in reasons if not r.startswith("no source asset id given")]
+    for rule in list(_enforce(prov).get("rules", [])) + list(_enforce(entry).get("rules", [])):
+        if rule.get("kind") == "matte_collision":
+            rule_reasons += _RULES["matte_collision"](rule, call, sources, cfg, reg)
     if not sources and not reasons:
         return [
             f"{call.provider}/{call.operation} requires a gated input image ({' / '.join(entry['required_gates_before'])}) "
@@ -903,7 +1009,7 @@ def recipe_gate_reasons(
         if source.path.exists():
             reasons += pipeline_reasons(source.path, call.provider, stage, cfg, reg,
                                         call_args=args, source_kind=source.kind)
-    return list(dict.fromkeys(reasons))
+    return list(dict.fromkeys(reasons + rule_reasons))
 
 
 # ----------------------------------------------------------------------------- override + context
@@ -1034,13 +1140,17 @@ def _review(tool_input: dict[str, Any], cfg: ProjectConfig, state: dict[str, Any
             for p in (item or {}).get("paths", []) or []:
                 candidates = [cfg.resolve(str(p)), spec_path.parent / str(p)]
                 full = next((c for c in candidates if c.is_file()), candidates[0])
+                # Readiness now correctly removes incomplete umbrella passes. Retain
+                # the specific completeness diagnosis instead of reporting "ungated".
+                problem = review_problem(full)
+                if full.is_file() and problem:
+                    if not any(entry.startswith(str(p) + ":") for entry in incomplete):
+                        incomplete.append(f"{p}: {problem}")
+                    continue
                 if not any(g in passed_gates(full) for g in REVIEW_GATES):
                     if str(p) not in missing:
                         missing.append(str(p))
                     continue
-                problem = review_problem(full)
-                if problem and not any(entry.startswith(str(p) + ":") for entry in incomplete):
-                    incomplete.append(f"{p}: {problem}")
     reasons = []
     if missing:
         shown = ", ".join(missing[:20]) + (f" (+{len(missing) - 20} more)" if len(missing) > 20 else "")
@@ -1051,7 +1161,7 @@ def _review(tool_input: dict[str, Any], cfg: ProjectConfig, state: dict[str, Any
     if incomplete:
         shown = "; ".join(incomplete[:12]) + (f" (+{len(incomplete) - 12} more)" if len(incomplete) > 12 else "")
         reasons.append(
-            f"{len(incomplete)} review page candidate(s) passed the pixel checks but not the look check: {shown}. "
+            f"{len(incomplete)} review page candidate(s) may have pixel diagnostics, but not the look check required for readiness: {shown}. "
             f"Turned views must be compared with the anchor by vision and animations with their source still "
             f"(`warden stage views` / `warden stage anim` do both) before anyone sees them.")
     return _finish("review", "publish", reasons, cfg, "")
@@ -1059,7 +1169,7 @@ def _review(tool_input: dict[str, Any], cfg: ProjectConfig, state: dict[str, Any
 
 # ----------------------------------------------------------------------------- entry point
 
-def check_call(
+def _check_call(
     tool_name: str,
     tool_input: dict[str, Any] | None,
     project_root: str | Path,
@@ -1078,6 +1188,11 @@ def check_call(
     try:
         name = str(tool_name or "")
         args = tool_input if isinstance(tool_input, dict) else {}
+        # Conservative coverage must be established before classification can fail.
+        state["spending"] = name.startswith(("mcp__pixellab__", "mcp__spritecook__", "mcp__plugin_spritecook_spritecook__"))
+        if name in ("Bash", "PowerShell"):
+            command = str(args.get("command") or "")
+            state["spending"] = bool(re.search(r"\b(?:warden|spritewarden|sprite-warden)\s+generate\b|(?:spritefusion|spritecook|pixellab|retrodiffusion)[^\s]*\.py", command, re.I))
         if name not in ("Bash", "PowerShell", "Artifact") and not name.startswith("mcp__"):
             return Verdict("ignore")
         cfg = load_config(project_root)
@@ -1122,3 +1237,23 @@ def check_call(
                            cfg if cfg is not None else ProjectConfig(root=Path(project_root)), "")
         except Exception:  # noqa: BLE001
             return Verdict("deny", state["provider"], state["operation"], [reason], "")
+
+
+def check_call(tool_name, tool_input, project_root, *, registry=None) -> Verdict:
+    """Import-light hook boundary with durable allow/deny telemetry (never logs ignored tools)."""
+    verdict = _check_call(tool_name, tool_input, project_root, registry=registry)
+    if verdict.decision == "ignore":
+        return verdict
+    try:
+        from .. import events
+        from uuid import uuid4
+        captured = events.emit("hook.allowed" if verdict.decision == "allow" else "hook.denied",
+                               project_root=project_root, run_id=events.current_run_id() or str(uuid4()),
+                               payload={"tool": tool_name, "provider": verdict.provider,
+                                        "operation": verdict.operation, "decision": verdict.decision,
+                                        "reasons": verdict.reasons})
+        if captured is None:
+            verdict.context += "\nWarning: hook decision capture unavailable."
+    except Exception:
+        verdict.context += "\nWarning: hook decision capture unavailable."
+    return verdict

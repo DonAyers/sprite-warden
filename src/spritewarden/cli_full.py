@@ -188,14 +188,14 @@ def _record_params(args: argparse.Namespace, command: str, keys: tuple[str, ...]
 
 def _write_records(paths, gates: dict, params: dict, enabled: bool) -> list[str]:
     """Write <image>.gate.json beside each image; never fails the command."""
-    if not enabled:
-        return []
     from .gates import write_record
 
     written: list[str] = []
     for p in paths:
         try:
-            written.append(str(write_record(p, gates, params=params)))
+            target = write_record(p, gates, params=params, persist=enabled)
+            if enabled:
+                written.append(str(target))
         except Exception as exc:  # noqa: BLE001 - a record is a convenience, the verdict stands
             console.print(f"[yellow]warning:[/] could not write gate record for {p}: {exc}")
     return written
@@ -224,6 +224,10 @@ def _pipeline_for(path) -> tuple[dict, Path | None]:
     return (data or {}), where
 
 
+from .gates.judging import judgment_operation
+
+
+@judgment_operation
 def cmd_judge_still(args: argparse.Namespace) -> int:
     identity = _load_identity(getattr(args, "char_id", None))
     card = evaluate_still(
@@ -288,15 +292,11 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
     gates["still"] = {"passed": bool(overall)}
     records = _write_records(
         [args.image], gates,
-        _record_params(args, "judge-still", ("palette", "scale", "symmetry", "start_image", "target_height",
+        {**_record_params(args, "judge-still", ("palette", "scale", "symmetry", "start_image", "target_height",
                                               "size_tier", "margin", "facing", "char_id", "vision", "vision_model")),
+         "reference": reference_path, "identity": identity.model_dump() if identity else None},
         not getattr(args, "no_record", False),
     )
-    if not overall:
-        failed = _failed(card)
-        if verdict and not verdict.passed:
-            failed.append({"name": "vision", "errors": [verdict.reasoning_summary]})
-        _log_rejection(args, args.image, "judge-still", failed)
 
     if args.json:
         out_dict = card.model_dump()
@@ -350,6 +350,7 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
     return 0 if overall else 1
 
 
+@judgment_operation
 def cmd_judge_views(args: argparse.Namespace) -> int:
     from PIL import Image
 
@@ -365,6 +366,7 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
     gate = check_direction_set(
         frames,
         anchor=anchor,
+        anchor_facing=args.anchor_facing,
         identity=identity,
         palette=None if args.no_palette else args.palette,
         ground_tolerance=args.ground_tolerance,
@@ -387,6 +389,7 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
             still = Path(identity.turnaround_stills[anchor_facing])
             if still.is_file():
                 vision_anchor = Image.open(still).convert("RGBA")
+                args.anchor = str(still)  # Persist the actual reference chosen from identity.
         if vision_anchor is None:
             vision_anchor = next((img for name, img in frames.items() if (canonical_facing(name) or name) == anchor_facing), None)
             skip_anchor_view = True
@@ -420,10 +423,10 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
     params = _record_params(args, "judge-views", ("cell", "anchor", "palette", "no_palette", "char_id",
                                                    "ground_tolerance", "height_tolerance", "area_tolerance",
                                                    "vision", "anchor_facing"))
+    params.update(direction_set=str(src), identity=identity.model_dump() if identity else None,
+                  side_front_area_ratio=identity.side_front_area_ratio if identity else None)
     enabled = not getattr(args, "no_record", False)
-    if vision_gate is None:
-        records = _write_records(targets, gates, params, enabled)
-    elif src.is_dir():
+    if src.is_dir():
         # each view's record carries ITS comparison with the anchor
         records = []
         for facing, path in files.items():
@@ -432,13 +435,10 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
                 own.update(gates_from_scorecard(vision_gates[facing]))
             records += _write_records([path], own, {**params, "facing": facing}, enabled)
     else:
-        records = _write_records(targets, {**gates, **gates_from_scorecard(vision_gate)}, params, enabled)
+        if vision_gate is not None:
+            gates.update(gates_from_scorecard(vision_gate))
+        records = _write_records(targets, gates, params, enabled)
 
-    if not gate.passed:
-        _log_rejection(args, src, "judge-views", _failed(gate))
-    for facing, vgate in vision_gates.items():
-        if not vgate.passed:
-            _log_rejection(args, files.get(facing, src), "judge-views", _failed(vgate))
 
     if args.json:
         out_dict = gate.model_dump()
@@ -484,6 +484,7 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
     return 0 if overall else 1
 
 
+@judgment_operation
 def cmd_judge_anim(args: argparse.Namespace) -> int:
     identity = _load_identity(getattr(args, "char_id", None))
     # The identity knows how the character moves; an explicit --locomotion wins.
@@ -507,8 +508,6 @@ def cmd_judge_anim(args: argparse.Namespace) -> int:
         _record_params(args, "judge-anim", ("cell", "walk", "locomotion", "palette", "source", "char_id")),
         not getattr(args, "no_record", False),
     )
-    if not card.passed:
-        _log_rejection(args, src, "judge-anim", _failed(card))
 
     if args.json:
         out_dict = card.model_dump()
@@ -802,7 +801,7 @@ def cmd_reject(args: argparse.Namespace) -> int:
             rc = 1
             continue
         mark_rejected(path, by=args.by, reason=args.reason)
-        log = log_rejection(path, by=args.by, reason=args.reason, provider=args.provider)
+        log = log_rejection(path, by=args.by, reason=args.reason, provider=args.provider, capture=False)
         console.print(f"[bold]rejected[/] {raw} [dim](logged to {log})[/]")
     return rc
 
@@ -898,6 +897,7 @@ def cmd_identity(args: argparse.Namespace) -> int:
             locomotion=args.locomotion,
             body_class=args.body_class,
             size_tier=args.size_tier,
+            side_front_area_ratio=args.side_front_area_ratio,
         )
     except ValueError as exc:
         console.print(f"[bold red]Identity not saved:[/] {escape(str(exc))}")
@@ -942,6 +942,106 @@ def cmd_repo_search(args: argparse.Namespace) -> int:
     for r in results:
         table.add_row(r["id"], r["name"], r["category"], r["game"], r.get("perspective") or "-", r["file_path"])
     console.print(table)
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    from .gallery.sync import sync_paths
+
+    cat = AssetCatalog()
+    report = sync_paths(
+        args.paths or None,
+        catalog=cat,
+        project_root=args.project,
+        recursive=not args.no_recursive,
+        game=args.game,
+        character_id=args.char_id,
+        category=args.category,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+        return 0
+    console.print(f"[bold green]Indexed {report.registered} new, {report.updated} updated asset(s)[/] "
+                  f"from {report.scanned} scanned PNG(s) ({report.with_record} gated, {report.rejected} rejected, "
+                  f"{report.already} already indexed)")
+    for err in report.errors[:10]:
+        console.print(f"  [red]error[/] {escape(err)}")
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .gallery.server import run_server
+    from .gallery.sync import sync_paths
+
+    cat = AssetCatalog()
+    if not args.no_sync:
+        report = sync_paths(None, catalog=cat, project_root=args.project, recursive=True)
+        console.print(f"[dim]synced the project: {report.registered} new, {report.updated} updated asset(s)[/]")
+    return run_server(
+        args.host,
+        args.port,
+        project_root=args.project,
+        catalog=cat,
+        open_browser=args.open,
+        quiet=args.quiet,
+    )
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    from .generator import get_driver, available_providers
+    from .repo.provenance import register_imports
+
+    cat = AssetCatalog()
+    provider = args.provider.strip().lower()
+    driver = get_driver(provider)
+    if driver is None:
+        console.print(f"[bold red]No driver for provider '{provider}'. Known:[/] {', '.join(available_providers())}")
+        return 1
+    if not driver.is_configured():
+        console.print(f"[bold red]Provider '{provider}' is not configured[/] (missing API key)")
+        return 1
+
+    if args.all:
+        out = Path(args.out) if args.out else Path("spritewarden_generated") / f"{provider}_library"
+        palette = args.palette  # None by default for a bulk import: keep the provider's bytes
+        progress = None if (args.json or args.quiet) else (
+            lambda listed, total: console.print(f"[dim]listed {listed} (running total {total})[/]"))
+        output = driver.fetch_all(out, palette=palette, max_items=args.max_items,
+                                  page_limit=args.page_limit, on_page=progress)
+        label = f"{provider} library"
+    else:
+        if not args.asset_id:
+            console.print("[bold red]fetch needs an asset_id, or --all to import the whole library[/]")
+            return 1
+        out = Path(args.out) if args.out else Path("spritewarden_generated") / f"{provider}_{args.asset_id}"
+        output = driver.fetch_asset(args.asset_id, out, cell=args.cell, palette=args.palette or "luap-40",
+                                    perspective=args.perspective, ground_row_offset=args.ground_row_offset,
+                                    is_object=args.kind == "object")
+        label = f"{provider}/{args.asset_id}"
+    if not output.success:
+        console.print(f"[bold red]Fetch failed:[/] {escape(str(output.error))}")
+        return 1
+
+    registered: list[str] = []
+    if not args.no_register:
+        try:
+            registered = register_imports(cat, provider=provider, output=output,
+                                          game=args.game, character_id=args.char_id)
+            output.metadata["catalog_asset_ids"] = registered
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a fetch
+            console.print(f"[yellow]Could not register in catalog:[/] {escape(str(exc))}")
+
+    if args.json:
+        print(json.dumps({"success": True, "provider": provider, "target": label,
+                          "files": output.output_files, "catalog_asset_ids": registered,
+                          "metadata": output.metadata}, indent=2, default=str))
+        return 0
+    console.print(f"[bold green]Fetched[/] {label}: {len(output.output_files)} file(s)")
+    if not args.all:
+        for f in output.output_files:
+            console.print(f"  {f}")
+    if registered:
+        console.print(f"  [dim]registered {len(registered)} asset(s) in the catalog[/]")
     return 0
 
 
@@ -1023,7 +1123,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         console.print("[bold red]No generation recipe produced.[/]")
         return 1
     if args.provider:
-        recipe.provider = args.provider
+        from .router.playbook import recompile_recipe
+        try:
+            recipe = recompile_recipe(recipe, args.provider)
+        except ValueError as exc:
+            console.print(f"[bold red]Invalid provider override:[/] {exc}")
+            return 1
     if getattr(args, "input", None):
         recipe.params["input_image"] = args.input
 
@@ -1160,7 +1265,11 @@ def _recipe_tips(args: argparse.Namespace, reg) -> int:
         out_path.write_text(json.dumps(tips, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     db = LearningDB()
     if args.mark_tips_exported:
-        count = mark_exported(tips, db)
+        try:
+            count = mark_exported(tips, db)
+        except ValueError as exc:
+            console.print(f"[bold red]Not marked exported:[/] {escape(str(exc))}")
+            return 1
         report = [{"title": t["title"], "export_key": t["export_key"], "action": "marked_exported"} for t in tips]
     else:
         try:
@@ -1444,6 +1553,7 @@ def main(argv: list[str] | None = None) -> None:
     p_iset.add_argument("--style-anchor", action="append", metavar="PROVIDER=VALUE", help="Provider id that pins the look (repeatable), e.g. spritecook=<asset_id>")
     p_iset.add_argument("--locomotion", choices=list(LOCOMOTION_MODES), help="How it moves (the walk gate's mode)")
     p_iset.add_argument("--body-class", choices=["figure", "rigid"], help="figure (head/torso/limbs) or rigid (vehicle, prop)")
+    p_iset.add_argument("--side-front-area-ratio", nargs=2, type=float, metavar=("MIN", "MAX"), help="Opt-in east/west area / south area bounds: 0 < MIN <= MAX <= 1")
     p_iset.add_argument("--size-tier", choices=sorted(SIZE_TIERS), help="Resolution tier of the whole set")
     p_iset.add_argument("--json", action="store_true", help="Output JSON")
     p_iset.set_defaults(func=cmd_identity)
@@ -1463,6 +1573,49 @@ def main(argv: list[str] | None = None) -> None:
     p_search.add_argument("--limit", type=int, default=15, help="Result limit")
     p_search.add_argument("--json", action="store_true", help="Output JSON")
     p_search.set_defaults(func=cmd_repo_search)
+
+    # serve (local asset gallery: stdlib HTTP server over the catalog + art tree)
+    p_serve = subparsers.add_parser("serve", help="Start the local asset gallery (stdlib web viewer over the catalog, gate records, pipelines, identities, rejections)")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1, local only)")
+    p_serve.add_argument("--port", type=int, default=8737, help="Bind port (default 8737; 0 picks a free port)")
+    p_serve.add_argument("--project", help="Project root for pipeline/identity/rejection lookups (default: found from the cwd)")
+    p_serve.add_argument("--no-sync", action="store_true", help="Do not index the project before serving")
+    p_serve.add_argument("--open", action="store_true", help="Open the gallery in the default browser")
+    p_serve.add_argument("--quiet", action="store_true", help="Do not log every request")
+    p_serve.set_defaults(func=cmd_serve)
+
+    # sync (index every local PNG + gate record into the catalog)
+    p_sync = subparsers.add_parser("sync", help="Index local art into the catalog: every PNG, its gate record and its nearest pipeline.json")
+    p_sync.add_argument("paths", nargs="*", help="Files or folders to index (default: the whole project root)")
+    p_sync.add_argument("--project", help="Project root (default: found from the cwd)")
+    p_sync.add_argument("--game", default="global", help="Game slug when no identity supplies one (default: global)")
+    p_sync.add_argument("--char-id", help="CharacterIdentity slug for every indexed image (default: nearest pipeline.json's bot)")
+    p_sync.add_argument("--category", default="local", help="Catalog category for indexed images (default: local)")
+    p_sync.add_argument("--no-recursive", action="store_true", help="Do not descend into subfolders")
+    p_sync.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_sync.set_defaults(func=cmd_sync)
+
+    # fetch (download an existing provider asset by id, or the whole account library)
+    p_fetch = subparsers.add_parser("fetch", help="Download existing provider work by id (PixelLab bundle, SpriteCook asset) or the whole account library (Sprite Fusion) into the local catalog")
+    p_fetch.add_argument("provider", help=f"Provider slug: {', '.join(available_providers())}")
+    p_fetch.add_argument("asset_id", nargs="?", help="The provider's own character/asset id (omit with --all)")
+    p_fetch.add_argument("--all", action="store_true",
+                         help="Import the provider's whole account library (Sprite Fusion GET /assets); ignores asset_id")
+    p_fetch.add_argument("--max-items", type=int, help="With --all: stop after this many assets")
+    p_fetch.add_argument("--page-limit", type=int, default=100, help="With --all: assets per listing page (1-100, default 100)")
+    p_fetch.add_argument("--kind", choices=["character", "object"], default="character", help="PixelLab: character or object bundle (default character)")
+    p_fetch.add_argument("--out", help="Output directory (default: ./spritewarden_generated/<provider>_<id> or _library)")
+    p_fetch.add_argument("--cell", type=int, default=64, help="Cell size in px (default 64)")
+    p_fetch.add_argument("--palette", default=None,
+                         help="Snap the output to this palette (default: single fetch luap-40; --all keeps the provider's bytes)")
+    p_fetch.add_argument("--perspective", default="low top-down", help="Baseline camera perspective")
+    p_fetch.add_argument("--ground-row-offset", type=int, default=7, help="Pixels up from the cell's bottom where feet rest (default 7)")
+    p_fetch.add_argument("--game", default="global", help="Game slug for catalog registration")
+    p_fetch.add_argument("--char-id", help="CharacterIdentity slug for catalog registration")
+    p_fetch.add_argument("--no-register", action="store_true", help="Do not register the fetched files in the catalog")
+    p_fetch.add_argument("--quiet", action="store_true", help="With --all: do not print per-page progress")
+    p_fetch.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_fetch.set_defaults(func=cmd_fetch)
 
     # route
     p_route = subparsers.add_parser("route", help="Route generation request via Jev or Fusion")

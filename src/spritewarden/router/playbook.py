@@ -80,6 +80,38 @@ def _apply_registry(recipe: GenerationRecipe, extra_rules: list[str] | None = No
     return recipe
 
 
+def recompile_recipe(recipe: GenerationRecipe, provider: str, operation: str | None = None) -> GenerationRecipe:
+    """Select a valid pair, then rebuild provider-owned policy and parameters.
+
+    Callers changing provider must use this rather than mutating ``provider``.
+    Source/identity arguments are deliberately not carried across providers.
+    """
+    reg = registry()
+    canonical = reg.canonical_provider(provider)
+    if canonical is None:
+        raise ValueError(f"Unknown provider: {provider}")
+    previous = reg.get(recipe.provider, recipe.operation)
+    stage = previous.enforce.get("stage") if previous else None
+    defaults = {
+        "spritefusion": {"rotation": "direction-set", "animation": "animate", None: "generate"},
+        "pixellab": {"rotation": "create_character_v3", "animation": "animate_skeleton", None: "inpaint"},
+        "spritecook": {"rotation": "generate_character", "animation": "animate_game_art", None: "generate_game_art"},
+        "retrodiffusion": {"rotation": "rotate", "animation": "walking", None: "rd_pro"},
+        "openrouter_image": {None: "generate"},
+    }
+    selected = operation or defaults.get(canonical, {}).get(stage)
+    entry = reg.get(canonical, selected or "")
+    if entry is None:
+        raise ValueError(f"Unsupported workflow: {canonical}/{stage or selected}")
+    result = GenerationRecipe(
+        provider=canonical, operation=entry.operation,
+        prompt="" if entry.operation == "direction-set" else sanitize_prompt_for_provider(recipe.prompt, canonical, entry.operation),
+        size=recipe.size, canvas_size=recipe.size, perspective=recipe.perspective,
+        palette_id=recipe.palette_id,
+    )
+    return _apply_registry(result)
+
+
 def determine_fallback_recipe(
     subject: str,
     asset_type: str,

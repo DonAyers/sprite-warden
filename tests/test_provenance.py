@@ -30,7 +30,11 @@ class _WritingDriver(BaseGeneratorDriver):
 
     def generate(self, recipe, output_dir):
         out = Path(output_dir)
-        files = [str(_png(out / "gear_1.png")), str(_png(out / "gear_2.png", (60, 200, 60, 255)))]
+        # Post-gates execute now: provenance fixtures must be valid on-palette outputs.
+        from spritewarden.judge.palette import load_palette
+        colors = load_palette(recipe.palette_id)
+        files = [str(_png(out / "gear_1.png", tuple(colors[0]) + (255,))),
+                 str(_png(out / "gear_2.png", tuple(colors[1]) + (255,)))]
         return GenerationOutput(success=True, provider="spritecook", output_files=files,
                                 metadata={"asset_ids": ["sc-asset-1", "sc-asset-2"], "credits_used": 3})
 
@@ -53,7 +57,7 @@ def test_dispatch_registers_outputs_with_provider_ids_and_params(tmp_path, monke
     assert row["game"] == "irm" and row["character_id"] == "gearbot" and row["asset_type"] == "sprite"
     assert row["frame_w"] == 16 and row["file_path"].endswith("gear_1.png")
     prov = row["provenance"]
-    assert prov["provider"] == "spritecook" and prov["operation"] == "generate" and prov["prompt"] == "brass gear icon"
+    assert prov["provider"] == "spritecook" and prov["operation"] == "generate_game_art" and prov["prompt"] == "brass gear icon"
     assert prov["provider_asset_ids"] == ["sc-asset-1", "sc-asset-2"] and prov["provider_asset_id"] == "sc-asset-1"
     assert cat.get_asset(ids[1])["provenance"]["provider_asset_id"] == "sc-asset-2"
     assert prov["params"]["mode"] == "assets" and len(prov["params"]["blob"]) < 100  # long values are cut

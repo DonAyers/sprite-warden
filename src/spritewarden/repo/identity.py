@@ -2,7 +2,17 @@
 
 from pathlib import Path
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def validate_side_front_area_ratio(value):
+    """Require a finite inclusive thin-profile range: 0 < minimum <= maximum <= 1."""
+    import math
+    if value is None:
+        return None
+    if len(value) != 2 or not all(math.isfinite(v) for v in value) or not 0 < value[0] <= value[1] <= 1:
+        raise ValueError("side_front_area_ratio must be two finite bounds: 0 < minimum <= maximum <= 1")
+    return value
 
 
 class FeatureLandmark(BaseModel):
@@ -32,6 +42,13 @@ class CharacterIdentity(BaseModel):
     locomotion: Literal["legs", "wheels", "treads"] | None = Field(default=None, description="How it moves: selects the walk gate's mode")
     body_class: Literal["figure", "rigid"] | None = Field(default=None, description="figure (head/torso/limbs) or rigid (vehicle, prop): selects the rotation tool")
     size_tier: Literal["16-32", "48-64", "96", "128"] | None = Field(default=None, description="Resolution tier of the whole set (drawn height range)")
+
+    side_front_area_ratio: list[float] | None = Field(default=None, description="Opt-in inclusive [minimum, maximum] east/west opaque area / south area")
+
+    @field_validator("side_front_area_ratio")
+    @classmethod
+    def validate_profile(cls, value):
+        return validate_side_front_area_ratio(value)
 
     def format_generation_prompt(self, action_or_pose: str = "") -> str:
         """Compose a prompt with positive description, action, and negative constraints."""
@@ -97,6 +114,7 @@ def build_identity(
     locomotion: str | None = None,
     body_class: str | None = None,
     size_tier: str | None = None,
+    side_front_area_ratio: list[float] | None = None,
 ) -> CharacterIdentity:
     """Create an identity or update ``existing``: ``None`` keeps a field; features, stills and
     style anchors merge by key (a new entry replaces the one with the same name)."""
@@ -105,6 +123,7 @@ def build_identity(
     simple = {
         "name": name, "prompt_description": prompt_description, "game": game, "palette_id": palette_id,
         "perspective": perspective, "dimensions": dimensions, "ground_row_offset": ground_row_offset,
+        "side_front_area_ratio": side_front_area_ratio,
         "prohibitions": prohibitions, "locomotion": locomotion, "body_class": body_class, "size_tier": size_tier,
     }
     for key, value in simple.items():

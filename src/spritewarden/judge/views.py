@@ -85,6 +85,7 @@ def check_direction_set(
     frames: dict[str, Image.Image],
     *,
     anchor: Image.Image | None = None,
+    anchor_facing: str = "south",
     identity: Any | None = None,
     palette: str | Path | list[str] | None = None,
     ground_tolerance: int = 1,
@@ -92,6 +93,14 @@ def check_direction_set(
     area_tolerance: float = 0.20,
 ) -> GateResult:
     """Compare 4-8 facings against an anchor. Returns one GateResult named ``direction_set``."""
+    import math
+    from ..repo.identity import validate_side_front_area_ratio
+    if not math.isfinite(area_tolerance) or not 0 <= area_tolerance < 1:
+        raise ValueError("area_tolerance must be finite and in [0, 1)")
+    validate_side_front_area_ratio(getattr(identity, "side_front_area_ratio", None))
+    anchor_canon = canonical_facing(anchor_facing)
+    if anchor_canon is None:
+        raise ValueError("anchor_facing must be a recognised facing")
     views: dict[str, Image.Image] = {}
     unknown: list[str] = []
     for name, img in frames.items():
@@ -182,13 +191,44 @@ def check_direction_set(
     off = {f: st["height"] - a_stats["height"] for f, st in stats.items() if abs(st["height"] - a_stats["height"]) > height_tolerance}
     record("height", not off, f"anchor {a_stats['height']}px" + (f"; views off by {off}px" if off else ", all views within +-%dpx" % height_tolerance))
 
-    # 3. Opaque area within 20% of the anchor
+    # An explicit profile policy changes area only; south remains the FRONT
+    # reference even when the supplied anchor is a side view.
+    policy = getattr(identity, "side_front_area_ratio", None)
+    metrics["side_front_area_ratio"] = policy
+    area_reference = a_stats
+    if policy is not None:
+        front = stats.get("south")
+        record("profile_reference", front is not None and "east" in stats and "west" in stats,
+               "profile policy requires nonempty south, east and west views")
+        if front is not None:
+            area_reference = front
+            if anchor is not None:
+                ratio = a_stats["opaque"] / front["opaque"]
+                is_profile = anchor_canon in ("east", "west")
+                valid = (policy[0] <= ratio <= policy[1] if is_profile
+                         else abs(ratio - 1) <= area_tolerance)
+                record("anchor_front_area", valid,
+                       f"external {anchor_canon}/south area {ratio:.4f}; expected "
+                       f"{policy if is_profile else '1 +/- ' + str(area_tolerance)}")
+                metrics["anchor_facing"] = anchor_canon
+            for side in ("east", "west"):
+                if side in stats:
+                    ratio = stats[side]["opaque"] / front["opaque"]
+                    record(f"{side}_front_area", policy[0] <= ratio <= policy[1],
+                           f"{side}/south area {ratio:.4f}; expected {policy}")
+        if "east" in stats and "west" in stats:
+            areas = [stats[f]["opaque"] for f in ("east", "west")]
+            difference = max(areas) / min(areas) - 1
+            record("profile_pair_area", difference <= area_tolerance,
+                   f"symmetric max/min area difference {difference:.4f}; tolerance {area_tolerance}")
+    # North and diagonals retain the ordinary area bound against FRONT.
     off = {
-        f: round(st["opaque"] / a_stats["opaque"], 2)
+        f: round(st["opaque"] / area_reference["opaque"], 2)
         for f, st in stats.items()
-        if abs(st["opaque"] - a_stats["opaque"]) > area_tolerance * a_stats["opaque"]
+        if not (policy is not None and f in ("east", "west"))
+        and abs(st["opaque"] - area_reference["opaque"]) > area_tolerance * area_reference["opaque"]
     }
-    record("area", not off, f"anchor {a_stats['opaque']}px" + (f"; views outside +-{int(area_tolerance * 100)}%: {off}" if off else f", all views within +-{int(area_tolerance * 100)}%"))
+    record("area", not off, f"{'front south' if policy is not None else 'anchor'} {area_reference['opaque']}px" + (f"; views outside +-{int(area_tolerance * 100)}%: {off}" if off else f", all views within +-{int(area_tolerance * 100)}%"))
 
     # 4. Component count equal across views; name the extra parts
     counts = {f: st["components"] for f, st in stats.items()}

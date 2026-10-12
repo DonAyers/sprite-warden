@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from .playbook import determine_fallback_recipe, GenerationRecipe
+from .playbook import determine_fallback_recipe, GenerationRecipe, recompile_recipe
 
 DECISIONS_API_URL = "https://openrouter.ai/api/alpha/decisions"
 
@@ -41,7 +41,7 @@ class JevClient:
         self.timeout = timeout
 
     def is_available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) and os.environ.get("SPRITEWARDEN_OFFLINE") != "1"
 
     def ask_decision(
         self,
@@ -197,5 +197,5 @@ class JevClient:
             is_vehicle_or_rigid=is_vehicle_or_rigid,
         )
         if not outcome.used_fallback:
-            recipe.provider = str(outcome.decision)
+            recipe = recompile_recipe(recipe, str(outcome.decision))
         return recipe

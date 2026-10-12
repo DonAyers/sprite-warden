@@ -17,6 +17,7 @@ from pydantic import Field
 
 from ..judge import evaluate_still, evaluate_animation, VisionJudge
 from ..judge.vision import DEFAULT_VISION_MODEL
+from ..gates.judging import judgment_operation
 from ..repo.identity import CharacterIdentity
 
 _catalog: Any = None
@@ -108,6 +109,7 @@ def register_character_identity(
     style_anchors: Annotated[dict | None, Field(description="Provider ids that pin the look, e.g. {'spritecook': '<asset_id>', 'pixellab_character_id': '...'}")] = None,
     locomotion: Annotated[str | None, Field(description="legs | wheels | treads: the walk gate's mode when judge_animation gets this character_id")] = None,
     body_class: Annotated[str | None, Field(description="figure (head/torso/limbs) | rigid (vehicle, prop)")] = None,
+    side_front_area_ratio: Annotated[list[float] | None, Field(description="Opt-in inclusive east/west opaque area / south area [MIN, MAX]; finite 0 < MIN <= MAX <= 1")] = None,
     size_tier: Annotated[str | None, Field(description="Resolution tier of the set: 16-32 | 48-64 | 96 | 128 (the start-image height check when judge_still gets this character_id)")] = None,
 ) -> dict:
     """Create or update a canonical CharacterIdentity to ensure cross-view visual consistency. On an existing id the optional fields left null are kept; features, stills and style anchors merge by key."""
@@ -132,6 +134,7 @@ def register_character_identity(
             locomotion=locomotion,
             body_class=body_class,
             size_tier=size_tier,
+            side_front_area_ratio=side_front_area_ratio,
         )
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
@@ -242,6 +245,7 @@ def pad_sprite(
 
 
 @mcp.tool()
+@judgment_operation
 def judge_still(
     file_path: Annotated[str, Field(description="Path to PNG image to evaluate")],
     palette: Annotated[str, Field(description="Target palette name (default: luap-40)")] = "luap-40",
@@ -311,25 +315,28 @@ def judge_still(
             expected_perspective=perspective,
         )
         out["orchestrated_verdict"] = verdict.model_dump()
-    overall = verdict.passed if verdict else card.passed
+    overall = bool(card.passed) and (verdict.passed if verdict else True)
     out["passed"] = bool(overall)
-    if write_gate_record:
-        gates = gates_from_scorecard(card)
-        if verdict:
-            gates["vision"] = {"passed": bool(verdict.passed), "score": round(verdict.production_ready_prob, 3),
-                               "summary": verdict.reasoning_summary}
-        gates["still"] = {"passed": bool(overall)}
-        try:
-            out["gate_record"] = str(write_record(file_path, gates, params={
-                "command": "judge_still", "palette": palette, "start_image": start_image, "target_height": target_height,
-                "size_tier": size_tier, "margin_px": margin_px, "facing": facing, "character_id": character_id, "vision": vision,
-            }))
-        except Exception as exc:  # noqa: BLE001
-            out["gate_record_error"] = str(exc)
+    gates = gates_from_scorecard(card)
+    if verdict:
+        gates["vision"] = {"passed": bool(verdict.passed), "score": round(verdict.production_ready_prob, 3),
+                           "summary": verdict.reasoning_summary}
+    gates["still"] = {"passed": bool(overall)}
+    try:
+        out["gate_record"] = str(write_record(file_path, gates, params={
+            "command": "judge_still", "palette": palette, "start_image": start_image, "target_height": target_height,
+            "size_tier": size_tier, "margin_px": margin_px, "facing": facing, "character_id": character_id, "vision": vision,
+            "reference": reference_path, "identity": identity.model_dump() if identity else None,
+        }, persist=write_gate_record))
+        if not write_gate_record:
+            out.pop("gate_record", None)
+    except Exception as exc:  # noqa: BLE001
+        out["gate_record_error"] = str(exc)
     return out
 
 
 @mcp.tool()
+@judgment_operation
 def judge_direction_set(
     source_path: Annotated[str, Field(description="Folder of <facing>.png files (south.png, down_right.png, ...) or a strip PNG in game order (down, down_right, right, up_right, up, up_left, left, down_left)")],
     cell_size: Annotated[int | None, Field(description="Cell size when the source is a strip (default: its height when it is N square cells)")] = None,
@@ -339,7 +346,9 @@ def judge_direction_set(
     write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside each view (or the strip)")] = True,
     vision: Annotated[bool, Field(description="Also compare EVERY view with the anchor by vision model (one PAID call per view): invented parts and parts missing though they should be visible FAIL; parts hidden by the turn do not. Writes gate vision_reference into each view's record. Offline = FAIL.")] = False,
     vision_model: Annotated[str, Field(description="Vision model slug")] = DEFAULT_VISION_MODEL,
+    area_tolerance: Annotated[float, Field(description="Opaque-area tolerance, finite in [0, 1); also symmetric max/min east/west difference with an identity profile policy")] = 0.20,
     description: Annotated[str, Field(description="Subject description for the vision comparison")] = "",
+    anchor_facing: Annotated[str, Field(description="Facing of the external anchor (default south); profile anchors must be explicitly east or west")] = "south",
 ) -> dict:
     """Cross-view gate for a direction set: same ground row (+-1), drawn height (+-2px), opaque area (+-20%), equal component count (extra parts are named), tool side per facing, palette."""
     from PIL import Image
@@ -351,50 +360,64 @@ def judge_direction_set(
     identity = get_catalog().get_identity(character_id) if character_id else None
     frames = load_direction_frames(source_path, cell=cell_size)
     anchor = Image.open(anchor_path).convert("RGBA") if anchor_path else None
-    gate = check_direction_set(frames, anchor=anchor, identity=identity, palette=palette)
+    gate = check_direction_set(frames, anchor=anchor, anchor_facing=anchor_facing, identity=identity, palette=palette, area_tolerance=area_tolerance)
     out = {"source": source_path, "views": list(frames), **gate.model_dump()}
     vision_gates: dict = {}
     vision_gate = None
     if vision:
         from ..judge.views import canonical_facing, compare_views_to_anchor, vision_summary_gate
 
+        anchor_facing = canonical_facing(anchor_facing) or anchor_facing
         vision_anchor = anchor
         skip = False
+        if vision_anchor is None and identity is not None:
+            identity_anchor = identity.turnaround_stills.get(anchor_facing)
+            if identity_anchor and Path(identity_anchor).is_file():
+                anchor_path = str(identity_anchor)
+                vision_anchor = Image.open(anchor_path).convert("RGBA")
         if vision_anchor is None:
-            vision_anchor = next((img for name, img in frames.items() if (canonical_facing(name) or name) == "south"), None)
+            vision_anchor = next((img for name, img in frames.items() if (canonical_facing(name) or name) == anchor_facing), None)
             skip = True
         if vision_anchor is None:
-            return {**out, "passed": False, "error": "vision needs an anchor: pass anchor_path or include a south view"}
+            return {**out, "passed": False, "error": f"vision needs an anchor: pass anchor_path or include a {anchor_facing} view"}
+        from ..enforce.core import find_pipeline
+        pipeline, _ = find_pipeline(Path(source_path))
+        pipeline = pipeline or {}
+        faces = pipeline.get("faces") if isinstance(pipeline.get("faces"), dict) else None
         vision_gates = compare_views_to_anchor(
-            frames, vision_anchor, VisionJudge(vision_model=vision_model), skip_anchor_view=skip,
-            description=description or (identity.prompt_description if identity is not None else ""),
+            frames, vision_anchor, VisionJudge(vision_model=vision_model), anchor_facing=anchor_facing, skip_anchor_view=skip,
+            description=description or str(pipeline.get("description") or "") or (identity.prompt_description if identity is not None else ""),
+            faces=faces,
         )
         vision_gate = vision_summary_gate(vision_gates)
         out["vision_reference"] = {"summary": vision_gate.model_dump(),
                                    "views": {f: g.model_dump() for f, g in vision_gates.items()}}
         out["passed"] = bool(gate.passed) and vision_gate.passed
-    if write_gate_record:
-        src = Path(source_path)
-        files = direction_frame_files(src) if src.is_dir() else {}
-        targets = list(files.values()) if src.is_dir() else [src]
-        by_path = {str(p): f for f, p in files.items()}
-        gates = gates_from_scorecard(gate)
-        gates["views"] = {"passed": bool(out["passed"]), "facings": list(frames)}
-        if vision_gate is not None and not src.is_dir():
-            gates.update(gates_from_scorecard(vision_gate))
-        params = {"command": "judge_direction_set", "cell": cell_size, "anchor": anchor_path, "palette": palette,
-                  "character_id": character_id, "vision": vision}
-        written = []
-        for t in targets:
-            try:
-                own = gates
-                facing_gate = vision_gates.get(by_path.get(str(t), ""))
-                if facing_gate is not None:
-                    own = {**gates, **gates_from_scorecard(facing_gate)}
-                written.append(str(write_record(t, own, params=params)))
-            except Exception as exc:  # noqa: BLE001
-                out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
-        out["gate_records"] = written
+    src = Path(source_path)
+    files = direction_frame_files(src) if src.is_dir() else {}
+    targets = list(files.values()) if src.is_dir() else [src]
+    by_path = {str(p): f for f, p in files.items()}
+    gates = gates_from_scorecard(gate)
+    gates["views"] = {"passed": bool(out["passed"]), "facings": list(frames)}
+    if vision_gate is not None and not src.is_dir():
+        gates.update(gates_from_scorecard(vision_gate))
+    params = {"command": "judge_direction_set", "cell": cell_size, "anchor": anchor_path, "anchor_facing": anchor_facing, "palette": palette,
+              "character_id": character_id, "vision": vision, "direction_set": source_path,
+              "area_tolerance": area_tolerance, "side_front_area_ratio": identity.side_front_area_ratio if identity else None,
+              "identity": identity.model_dump() if identity else None}
+    written = []
+    for t in targets:
+        try:
+            own = gates
+            facing_gate = vision_gates.get(by_path.get(str(t), ""))
+            if facing_gate is not None:
+                own = {**gates, **gates_from_scorecard(facing_gate)}
+            target = write_record(t, own, params={**params, "facing": by_path.get(str(t))}, persist=write_gate_record)
+            if write_gate_record:
+                written.append(str(target))
+        except Exception as exc:  # noqa: BLE001
+            out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
+    out["gate_records"] = written
     return out
 
 
@@ -402,14 +425,20 @@ def judge_direction_set(
 def review_check(
     paths: Annotated[list[str], Field(description="Image files, folders, or glob patterns")],
     require: Annotated[list[str], Field(description="Gate names that must have passed; any one satisfies (start_image, views, anim, still, direction_set, ...)")] = ["still"],
+    read_only: Annotated[bool, Field(description="Inspect evidence including failed/rejected candidates; never grants promotion readiness")] = False,
 ) -> dict:
-    """Gatekeeper: report which images lack a current passed gate record (<image>.gate.json whose sha256 matches the file). Refuse to build review pages or derive rotations/animations from files listed under `missing`."""
+    """Inspect candidates freely, or check strict transition readiness (the default)."""
     from ..gates import require_passed
-
+    if read_only:
+        from ..gates.records import _expand, load_record
+        files = _expand(paths)
+        return {"ok": bool(files) and all(p.is_file() for p in files), "read_only": True,
+                "evidence": [{"path": str(p), "record": load_record(p)} for p in files]}
     return require_passed(paths, require)
 
 
 @mcp.tool()
+@judgment_operation
 def judge_animation(
     sheet_or_dir_path: Annotated[str, Field(description="Path to spritesheet PNG or directory of frame PNGs")],
     cell_size: Annotated[int | None, Field(description="Square cell size for spritesheet, e.g. 64 or 96")] = None,
@@ -446,6 +475,35 @@ def judge_animation(
             out.setdefault("gate_record_errors", []).append(f"{t}: {exc}")
     out["gate_records"] = written
     return out
+
+
+@mcp.tool()
+def inspect_workflow(project_root: str, character_dir: str) -> dict:
+    """Inspect current revisions and readiness without spending or promoting."""
+    from ..workflow import inspect
+    return inspect(project_root, character_dir)
+
+
+@mcp.tool()
+def plan_workflow(project_root: str, provider: str, operation: str, prompt: str,
+                  params: dict, character_dir: str | None = None) -> dict:
+    """Compile an exact provider contract and its dependency fingerprints; no paid calls."""
+    from ..workflow import plan
+    return plan(project_root, provider, operation, prompt, params, character_dir=character_dir)
+
+
+@mcp.tool()
+def execute_workflow(project_root: str, plan: dict, output_dir: str, authorize_spend: bool = False) -> dict:
+    """Execute a current plan once. Explicit authorize_spend is required; never retry an unknown completion."""
+    from ..workflow import execute
+    return execute(project_root, plan, output_dir, authorize_spend=authorize_spend)
+
+
+@mcp.tool()
+def workflow_history(project_root: str, run_id: str | None = None, limit: int = 100) -> list:
+    """Read immutable workflow events, including failed attempts and human decisions."""
+    from ..workflow import history
+    return history(project_root, run_id=run_id, limit=limit)
 
 
 @mcp.tool()

@@ -137,7 +137,12 @@ def test_tool_to_provider_operation_mapping(tmp_path):
     ]
     for tool, inp, expected in cases:
         v = check_call(tool, inp, tmp_path)
-        assert v.decision == "allow", (tool, inp, v.reasons)
+        # Classification stays exact; source-free and unknown contracts now deny.
+        denied = {("pixellab", "animate_skeleton"), ("pixellab", "animate_template"),
+                  ("pixellab", "animate_text"), ("pixellab", "create_character_state"),
+                  ("pixellab", "create_image_pixflux"), ("spritecook", "remove_background"),
+                  ("spritewarden", "generate")}
+        assert v.decision == ("deny" if expected in denied else "allow"), (tool, inp, v.reasons)
         assert (v.provider, v.operation) == expected
 
 
@@ -216,7 +221,7 @@ def test_forbid_inline_image_args(tmp_path, arg):
 
 
 def test_forbidden_words_on_each_prompt_argument(tmp_path):
-    v = check_call(PL + "create_image_pixflux", {"description": "a robot, transparent background, 16-bit"}, tmp_path)
+    v = check_call(PL + "inpaint_image_pro_flash", {"description": "a robot, transparent background, 16-bit"}, tmp_path)
     assert v.decision == "deny" and len(v.reasons) == 2
     assert '"transparent background"' in v.reasons[0] and "`description`" in v.reasons[0]
     v = check_call(PL + "animate_character", {"action_description": "walks, high quality"}, tmp_path)
@@ -374,8 +379,8 @@ def test_pixellab_reference_urls_resolve_through_the_manifest(tmp_path):
     # a URL registered by its exact address resolves, and that file is not gated
     v = check_call(PL + "animate_with_skeleton_v3", {"end_frame_url": "https://cdn.example.com/x/ungated.png"}, tmp_path)
     assert v.decision == "deny" and "art/ungated.png has no gate record" in v.reasons[0]
-    # no reference at all: a prompt-only generation
-    assert check_call(PL + "create_character", {"description": "small robot"}, tmp_path).decision == "allow"
+    # This rotation workflow requires a source, not a prompt-only bypass.
+    assert check_call(PL + "create_character", {"description": "small robot"}, tmp_path).decision == "deny"
 
 
 def test_pixellab_character_views_must_be_gated(tmp_path):
@@ -546,7 +551,7 @@ def test_internal_errors_fail_closed(tmp_path, monkeypatch):
     import spritewarden.enforce.core as core
 
     monkeypatch.setattr(core, "_classify_mcp", lambda *a, **k: 1 / 0)
-    assert check_call(SC + "generate_game_art", {}, tmp_path).decision == "ignore"
+    assert check_call(SC + "generate_game_art", {}, tmp_path).decision == "deny"
 
 
 # ------------------------------------------------------------------ the CLI and the hook protocol

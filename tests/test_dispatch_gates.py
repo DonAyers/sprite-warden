@@ -63,7 +63,9 @@ def test_rotation_needs_a_gated_input(tmp_path, monkeypatch):
 
     write_record(src, {"start_image": True})
     out = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path)
-    assert out.success is True and _FakeDriver.calls == ["sprite_fusion/direction-set"]
+    # Preflight reached the driver, but its empty output must fail post-validation.
+    assert not out.success and out.metadata["execution"] == "completed"
+    assert _FakeDriver.calls == ["sprite_fusion/direction-set"]
     assert "forced_ungated" not in out.metadata
 
 
@@ -71,8 +73,11 @@ def test_force_ungated_runs_and_records_why(tmp_path, monkeypatch):
     _fake_drivers(monkeypatch)
     _png(tmp_path / "art" / "hull.png")
     recipe = _recipe("sprite_fusion", "direction-set", input_image=str(tmp_path / "art" / "hull.png"))
+    recipe.prompt = ""  # direction-set never accepts a prompt
     out = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path, force_ungated=True)
-    assert out.success is True and _FakeDriver.calls == ["sprite_fusion/direction-set"]
+    # Preflight reached the driver, but its empty output must fail post-validation.
+    assert not out.success and out.metadata["execution"] == "completed"
+    assert _FakeDriver.calls == ["sprite_fusion/direction-set"]
     assert any("no gate record" in r for r in out.metadata["forced_ungated"])
 
 
@@ -90,7 +95,8 @@ def test_asset_ids_and_pipeline_resolve_like_the_hook(tmp_path, monkeypatch):
     write_record(src, {"still": True})  # clean pixels are not anchor readiness
     assert gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path).success is False
     write_record(src, {"start_image": True})
-    assert gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path).success is True
+    checked = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path)
+    assert not checked.success and checked.metadata["execution"] == "completed"
 
     (bot / "pipeline.json").write_text(json.dumps({"animation_provider": "pixellab"}), encoding="utf-8")
     out = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path)
@@ -101,14 +107,17 @@ def test_asset_ids_and_pipeline_resolve_like_the_hook(tmp_path, monkeypatch):
     assert out.success is False and "not in art_source/spritecook-assets.json" in out.error
 
 
-def test_stills_edits_and_unknown_recipes_are_not_gated(tmp_path, monkeypatch):
+def test_stills_edits_execute_but_unknown_and_missing_inputs_refuse(tmp_path, monkeypatch):
     _fake_drivers(monkeypatch)
     for recipe in (
         determine_fallback_recipe("gear icon", "icon"),  # spritecook generate
         _recipe("spritecook", "edit", edit_asset_id=ASSET),  # edits create anchors
-        _recipe("sprite_fusion", "edit", inputs=["nope.png"]),
-        _recipe("pixellab", "create_topdown_tileset"),  # no registry entry
     ):
         out = gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path)
-        assert out.success is True, (recipe.operation, out.error)
+        assert not out.success and out.metadata["execution"] == "completed", out.error
+    calls = list(_FakeDriver.calls)
+    for recipe in (_recipe("sprite_fusion", "edit", inputs=["nope.png"]),
+                   _recipe("pixellab", "create_topdown_tileset")):
+        assert not gen_registry.dispatch(recipe, tmp_path / "out", project_root=tmp_path).success
+    assert _FakeDriver.calls == calls
     assert gen_registry.ungated_reasons(_recipe("spritecook", "generate"), tmp_path) == []

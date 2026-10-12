@@ -1,6 +1,8 @@
 """Tests for the spritewarden.learning L3 (scheduler, doctor, tipshare, project watch, MCP)."""
 
 from pathlib import Path
+import json
+import sys
 
 import pytest
 
@@ -71,13 +73,25 @@ def test_doctor_report_surfaces_warnings(tmp_path: Path):
     assert data["db_path"].endswith("l.db")
 
 
-def test_tipshare_export_and_mark(tmp_path: Path):
+def test_tipshare_export_requires_verified_publish(tmp_path: Path, monkeypatch):
     db = LearningDB(tmp_path / "l.db")
     db.upsert_strategy(Strategy(id="s1", scope_key="p|o|a|top-down", what="Prefer X", how="Do Y", why="Because Z", status="active"))
     payloads = export_tips(db, topic="godot-pixel-art")
     assert len(payloads) == 1 and payloads[0]["title"] == "Prefer X"
 
-    export_tips(db, topic="godot-pixel-art", mark=True)
+    with pytest.raises(ValueError, match="verified get_tip receipt"):
+        export_tips(db, topic="godot-pixel-art", mark=True)
+    assert db.list_tip_exports() == []
+    assert export_tips(db) == payloads
+
+    from spritewarden.learning.recipe_tips import publish_tips
+    store = tmp_path / "tips.json"
+    store.write_text(json.dumps({"tips": [], "calls": []}), encoding="utf-8")
+    monkeypatch.setenv("FAKE_TIPSHARE_STORE", str(store))
+    command = [sys.executable, str(Path(__file__).parent / "fixtures" / "fake_tipshare_server.py")]
+    report = publish_tips(payloads, db, command=command, dry_run=False)
+    assert report[0]["action"] == "published", report
+    assert db.list_tip_exports()[0]["tip_ref"] == json.loads(store.read_text(encoding="utf-8"))["tips"][0]["uuid"]
     assert export_tips(db) == []
     assert len(export_tips(db, include_exported=True)) == 1
     assert db.list_tip_exports()[0]["strategy_id"] == "s1"

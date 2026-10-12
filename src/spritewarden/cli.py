@@ -14,6 +14,10 @@ FAST_COMMANDS = ("hook", "check-call", "rules", "pipeline")
 
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "workflow":
+        from .workflow_cli import main as workflow_main
+
+        sys.exit(workflow_main(args[1:]))
     if args and args[0] in FAST_COMMANDS:
         from .enforce.cli import main as enforce_main
 

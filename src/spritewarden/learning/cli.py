@@ -266,6 +266,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_export_tips(args: argparse.Namespace) -> int:
     from .tipshare_bridge import export_tips
 
+    if args.mark:
+        console.print("[red]Blind marking disabled: publish with a verified get_tip receipt.[/]")
+        return 1
     db = LearningDB()
     payloads = export_tips(db, topic=args.topic, mark=args.mark and not args.publish, include_exported=args.all)
     if getattr(args, "recipes", False):
@@ -301,7 +304,7 @@ def cmd_export_tips(args: argparse.Namespace) -> int:
     for t in payloads:
         console.print(f" • {escape(t['title'])}")
     if not args.mark:
-        console.print("[dim]Re-run with --mark to record these as exported.[/]")
+        console.print("[dim]Use --publish for a verified export receipt; blind --mark is disabled.[/]")
     return 0
 
 
@@ -341,12 +344,72 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_knowledge_sync(args):
+    from pathlib import Path
+    from .tipshare_bridge import sync_outcomes, import_corrections, curated_corrections
+    # Dry-runs migrate a disposable snapshot, never the configured/live DB.
+    import os
+    import sqlite3
+    import tempfile
+    from .db import DEFAULT_DB_PATH
+    temporary = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) if not args.store else None
+    if temporary:
+        source = Path(os.environ.get("SPRITEWARDEN_LEARNING_DB", str(DEFAULT_DB_PATH)))
+        target = Path(temporary.name) / "preview.db"
+        if source.exists():
+            src = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)
+            dst = sqlite3.connect(target)
+            try:
+                src.backup(dst)
+            finally:
+                src.close(); dst.close()
+        db = LearningDB(target)
+    else:
+        db = LearningDB()
+    data = json.loads(Path(args.input).read_text(encoding="utf-8")) if args.input else None
+    dry_run = not args.store
+    if args.learn_command == "sync-outcomes":
+        result = sync_outcomes(db, data, dry_run=dry_run)
+    else:
+        corrections = curated_corrections() if args.curated else data
+        if corrections is None:
+            raise ValueError("Provide --curated or --input corrections.json")
+        result = import_corrections(db, corrections, dry_run=dry_run)
+    _emit(args, result)
+    if temporary:
+        temporary.cleanup()
+    return 0
+
+
+def cmd_watch_dependencies(args):
+    from .registry import register_dependencies
+    count = register_dependencies(LearningDB(), args.provider, operation_docs=args.operation_doc or [], skill_paths=args.skill or [])
+    _emit(args, {"registered": count})
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "learn",
         help="Self-learning knowledge base: watch provider docs, record episodes, review proposals",
     )
     learn = p.add_subparsers(dest="learn_command", required=True)
+
+    for name in ("sync-outcomes", "corrections"):
+        sync = learn.add_parser(name, help="Review-only knowledge ingestion; defaults to dry-run")
+        sync.add_argument("--input", help="Tipshare export or correction proposal JSON")
+        mode = sync.add_mutually_exclusive_group()
+        mode.add_argument("--dry-run", action="store_true")
+        mode.add_argument("--store", action="store_true", help="Store local review proposals only; never publish/apply policy")
+        sync.add_argument("--curated", action="store_true", help="Use audited #34/#31/#40/#60/#63 proposals")
+        sync.add_argument("--json", action="store_true")
+        sync.set_defaults(func=cmd_knowledge_sync)
+    deps = learn.add_parser("watch-dependencies", help="Watch explicit operation docs and installed skill files")
+    deps.add_argument("--provider", required=True)
+    deps.add_argument("--operation-doc", action="append")
+    deps.add_argument("--skill", action="append")
+    deps.add_argument("--json", action="store_true")
+    deps.set_defaults(func=cmd_watch_dependencies)
 
     ps = learn.add_parser("sources", help="List watched provider sources")
     ps.add_argument("--provider", help="Filter by provider")
@@ -438,7 +501,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     pt = learn.add_parser("export-tips", help="Emit tipshare `share_tip` payloads for active strategies")
     pt.add_argument("--topic", default="godot-pixel-art")
-    pt.add_argument("--mark", action="store_true", help="Record these as exported")
+    pt.add_argument("--mark", action="store_true", help="Deprecated: refuses blind marking; use verified publishing")
     pt.add_argument("--all", action="store_true", help="Include already-exported strategies")
     pt.add_argument("--recipes", action="store_true", help="Also include one tip per provider generated from the recipe registry")
     pt.add_argument("--publish", action="store_true",

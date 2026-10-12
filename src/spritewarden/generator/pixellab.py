@@ -29,6 +29,8 @@ GAME_ORDER = [
 class PixelLabDriver(BaseGeneratorDriver):
     """Driver for fetching and laying out PixelLab character & object bundles."""
 
+    provider_name = "pixellab"
+
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ.get("PIXELLAB_API_KEY", "")
 
@@ -36,7 +38,30 @@ class PixelLabDriver(BaseGeneratorDriver):
         # Bundles can be fetched without an API key using the bundle download endpoint
         return True
 
+    def fetch_asset(self, asset_id: str, output_dir: str | Path, **params: Any) -> GenerationOutput:
+        """Download a PixelLab character/object bundle by id and lay out its 8-direction strip."""
+        cell = int(params.get("cell") or 64)
+        recipe = GenerationRecipe(
+            provider="pixellab",
+            operation="download_bundle",
+            prompt=f"fetch pixellab {asset_id}",
+            size=cell,
+            canvas_size=cell,
+            perspective=str(params.get("perspective") or "low top-down"),
+            palette_id=str(params.get("palette") or "luap-40"),
+            params={
+                "character_id": asset_id,
+                "is_object": bool(params.get("is_object")),
+                "ground_row_offset": int(params.get("ground_row_offset") or 7),
+            },
+        )
+        return self._download_bundle(recipe, output_dir)
+
     def generate(self, recipe: GenerationRecipe, output_dir: str | Path) -> GenerationOutput:
+        return GenerationOutput(success=False, provider="pixellab",
+                                error="Unsupported execution: PixelLab is import-only; use fetch_asset for existing bundles")
+
+    def _download_bundle(self, recipe: GenerationRecipe, output_dir: str | Path) -> GenerationOutput:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 

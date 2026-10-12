@@ -1,6 +1,7 @@
 """OpenRouter Fusion Deliberation Synthesizer: multi-model recipe formulation for novel assets."""
 
 import json
+import os
 from typing import Any
 import httpx
 from pydantic import BaseModel, Field
@@ -29,7 +30,7 @@ class FusionSynthesizer:
         self.timeout = timeout
 
     def is_available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) and os.environ.get("SPRITEWARDEN_OFFLINE") != "1"
 
     def deliberate_pipeline(
         self,

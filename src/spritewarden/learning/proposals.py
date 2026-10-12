@@ -19,6 +19,8 @@ def review(db: LearningDB, proposal_id: int, approve: bool) -> Proposal | None:
     proposal = db.get_proposal(proposal_id)
     if proposal is None:
         return None
+    if proposal.status != "open":
+        return proposal
     status = "approved" if approve else "rejected"
     db.set_proposal_status(proposal_id, status, utcnow())
     proposal.status = status
@@ -47,3 +49,12 @@ def _apply(db: LearningDB, proposal: Proposal) -> None:
         event_id = proposal.evidence.get("event_id") if isinstance(proposal.evidence, dict) else None
         if isinstance(event_id, int):
             db.set_event_review(event_id, "acknowledged")
+            event = next((e for e in db.list_events(limit=100000) if e.id == event_id), None)
+            create_proposal(db, Proposal(kind="change_param", target=f"doc-update:{event_id}",
+                what="Proposed contract/test/documentation update after doc review",
+                how="Review the attached diff against affected operation contracts; implement and test a bounded update before publishing a replacement tip.",
+                why="Acknowledging source drift is not permission to silently rewrite executable policy",
+                evidence={"event_id": event_id, "source_id": event.source_id if event else None,
+                          "diff": event.diff_text if event else "", "automatic_application": False,
+                          "evidence_state": "reviewed_source_pending_contract_verification",
+                          "proposed_targets": ["data/recipes.json", "provider serializer tests", "operation documentation", "versioned recipe tips"]}))

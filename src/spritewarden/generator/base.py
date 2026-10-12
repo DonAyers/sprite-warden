@@ -30,3 +30,28 @@ class BaseGeneratorDriver(ABC):
     def generate(self, recipe: GenerationRecipe, output_dir: str | Path) -> GenerationOutput:
         """Execute generation according to the supplied recipe."""
         pass
+
+    def fetch_asset(self, asset_id: str, output_dir: str | Path, **params: Any) -> GenerationOutput:
+        """Download an already-existing provider asset by its id, when the provider supports it.
+
+        The default is unsupported; drivers override it for the providers that expose a
+        fetch-by-id/download surface (PixelLab bundles, SpriteCook assets). This is what
+        ``warden fetch`` calls to pull provider work down locally.
+        """
+        return GenerationOutput(
+            success=False,
+            provider=getattr(self, "provider_name", type(self).__name__),
+            error=f"provider does not support fetch-by-id (asset_id={asset_id!r})",
+        )
+
+    def fetch_all(self, output_dir: str | Path, **params: Any) -> GenerationOutput:
+        """Download the provider's whole account asset library, when it exposes a listing.
+
+        The default is unsupported; Sprite Fusion overrides it (``GET /assets`` is
+        cursor-paginated). This is what ``warden fetch <provider> --all`` calls.
+        """
+        return GenerationOutput(
+            success=False,
+            provider=getattr(self, "provider_name", type(self).__name__),
+            error="provider does not expose an account asset listing (fetch by id instead)",
+        )

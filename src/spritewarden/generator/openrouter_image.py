@@ -27,6 +27,9 @@ class OpenRouterImageDriver(BaseGeneratorDriver):
         return bool(self.api_key)
 
     def generate(self, recipe: GenerationRecipe, output_dir: str | Path) -> GenerationOutput:
+        from .contracts import capability_status
+        if not capability_status("openrouter_image", recipe.operation)["executable"]:
+            return GenerationOutput(success=False, provider="openrouter_image", error=f"Unsupported workflow: {recipe.operation}")
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 

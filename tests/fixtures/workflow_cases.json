@@ -1,0 +1,11 @@
+[
+  {"name":"network failure is not visual rejection","gates":{"vision_reference":{"passed":false,"status":"unavailable"}},"expected":"needs_evidence","provenance":"Historical issue log section 4; behavioral fixture, not a provider output"},
+  {"name":"asymmetric tools need scoped artistic exception","gates":{"symmetry":{"passed":false}},"decision":"accepted_with_exception","exception_scoped":true,"expected":"accepted_with_exception","provenance":"Owner-picked asymmetric bildBot anchor; behavioral fixture"},
+  {"name":"intentional idle rest retains failed measurement","gates":{"loop_smoothness":{"passed":false}},"decision":"accepted_with_exception","exception_scoped":true,"expected":"accepted_with_exception","provenance":"Recorded idle_pick; behavioral fixture"},
+  {"name":"missing source-relative head fill blocks transition","gates":{"frame_integrity":{"passed":false}},"expected":"blocked","provenance":"Issue log sections 9 and 12; cause is not assumed"},
+  {"name":"retracted texture loss is not a lesson","claim_status":"retracted","gates":{"preservation":{"passed":false}},"expected":"needs_review","provenance":"Issue log section 14 retracts initial diagnosis"},
+  {"name":"changed anchor invalidates dependent evidence","stale":true,"decision":"accepted","gates":{"views":{"passed":true}},"expected":"stale","provenance":"Revision dependency contract"},
+  {"name":"pixel checks cannot establish artistic approval","gates":{"still":{"passed":true}},"expected":"needs_review","provenance":"Owner rejected technically passing render"},
+  {"name":"owner rejection dominates machine pass","decision":"rejected","gates":{"still":{"passed":true}},"expected":"rejected","provenance":"Owner rejection contract"},
+  {"name":"unscoped exception cannot clear a failed check","decision":"accepted_with_exception","exception_scoped":false,"gates":{"symmetry":{"passed":false}},"expected":"blocked","provenance":"Exceptions require revision/gate/operation binding"}
+]

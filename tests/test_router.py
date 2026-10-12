@@ -42,12 +42,17 @@ def test_determine_fallback_recipe_walk():
 
 
 def test_pipeline_router_deduplication(tmp_path: Path):
+    from PIL import Image
+    from spritewarden.gates.records import write_record
+    image = tmp_path / "smolbot.png"
+    Image.new("RGBA", (32, 32), (255, 255, 255, 255)).save(image)
+    write_record(image, {"still": True})
     db_file = tmp_path / "router_test.db"
     cat = AssetCatalog(db_file)
     cat.register_asset(
         asset_id="smolbot_idle_south",
         name="SmolBot Idle South",
-        file_path="assets/sprites/smolbot.png",
+        file_path=str(image),  # current readiness evidence is required for reuse
         asset_type="character",
         perspective="low top-down",
         game="i-require-maintenance",

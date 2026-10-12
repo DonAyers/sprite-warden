@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from pydantic import BaseModel, Field
 
-from .playbook import GenerationRecipe, sanitize_prompt_for_provider, determine_fallback_recipe
+from .playbook import GenerationRecipe, sanitize_prompt_for_provider, determine_fallback_recipe, recompile_recipe
 from .jev import JevClient, DecisionOutcome
 from .fusion import FusionSynthesizer, DeliberationResult
 from ..repo.catalog import AssetCatalog
@@ -39,9 +39,31 @@ class PipelineRouter:
         is_animation: bool = False,
         is_vehicle_or_rigid: bool = False,
         force_fusion: bool = False,
+        pipeline_path: str | Path | None = None,
     ) -> TriageRoutingResult:
         """Evaluate request: check for existing assets, then route to the optimal provider."""
         char_id = character_identity.id if isinstance(character_identity, CharacterIdentity) else character_identity
+
+        recorded = None
+        pipeline = {}
+        if pipeline_path is not None:
+            import json
+            path = Path(pipeline_path)
+            if path.is_dir():
+                path = path / "pipeline.json"
+            pipeline = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(pipeline, dict):
+                raise ValueError("pipeline.json must be an object")
+            recorded = pipeline.get("animation_provider" if is_animation else "rotation_provider")
+            if recorded:
+                base = determine_fallback_recipe(prompt, asset_type, perspective, size,
+                                                 is_animation=is_animation, is_vehicle_or_rigid=is_vehicle_or_rigid)
+                compiled = recompile_recipe(base, recorded)
+                if not is_animation and pipeline.get("anchor"):
+                    compiled.params["input_image"] = str((path.parent / pipeline["anchor"]).resolve())
+                self._attach_learned_rules(compiled, asset_type, perspective)
+                return TriageRoutingResult(action="generate_new", recipe=compiled,
+                                           explanation="Using the recorded pipeline route; model selection was not consulted.")
 
         # 1. Search existing art catalog (Deduplication)
         existing_matches = self.catalog.search(
@@ -53,6 +75,10 @@ class PipelineRouter:
             limit=3,
         )
 
+        from ..gates.records import stage_readiness
+        wanted = ("anim",) if is_animation else ("still", "start_image", "views")
+        existing_matches = [match for match in existing_matches if match.get("file_path") and
+                            any(stage_readiness(match["file_path"], stage)["ready"] for stage in wanted)]
         if existing_matches:
             best_match = existing_matches[0]
             # If the user prompt closely matches an existing file, recommend reuse

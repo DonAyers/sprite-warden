@@ -1,17 +1,18 @@
 """Recipe tips: one tipshare payload per provider, generated from the recipe registry, and a
 publisher that talks to a tipshare MCP stdio server.
 
-The registry is the enforced source of each provider's rules; the tips are its readable
-export for other agents. Publishing is opt-in and careful: the server is searched first, a
-tip whose title already exists is skipped, and what was sent is recorded in ``tip_exports``.
+The registry is local policy, not proof of live provider behavior or complete interception.
+Tips are content-versioned projections. Publishing is opt-in; matching titles require
+content readback, and only verified UUID receipts are recorded in ``tip_exports``.
 
 Server command: env ``SPRITEWARDEN_TIPSHARE_CMD``, a JSON array, e.g.
-``["node", "C:/Users/Don/Documents/Projects/tipshare/dist/server.js"]``. The child gets
+``["node", "C:/path/to/tipshare/dist/server.js"]``. The child gets
 ``TIPSHARE_AGENT_ID=sprite-warden`` so the tips are attributable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,7 +30,7 @@ LABELS = {
     "spritecook": "SpriteCook",
     "openrouter_image": "Image models (OpenRouter)",
 }
-TIP_FIELDS = ("topic_slug", "title", "summary", "problem", "solution", "gotchas", "artifact_name", "artifact_code", "author")
+TIP_FIELDS = ("topic_slug", "title", "summary", "problem", "solution", "gotchas", "artifact_name", "artifact_code", "author", "supersedes", "applicability", "evidence_state")
 
 
 def _start_image_line(si: dict[str, Any] | None) -> str | None:
@@ -89,7 +90,11 @@ def build_recipe_tips(registry: dict[str, Any] | None = None, topic: str = DEFAU
         ops = prov.get("operations") or {}
         enforce = prov.get("enforce") or {}
 
-        lines: list[str] = []
+        projection = {"provider": prov, "pipeline_rules": registry.get("pipeline_rules", []), "stages": registry.get("stages", {}), "version": version}
+        digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        lines: list[str] = ["Pipeline rules: " + json.dumps(projection["pipeline_rules"]),
+                            "Stages: " + json.dumps(projection["stages"]),
+                            "Provider identity: " + json.dumps(prov.get("identity", {}))]
         if defaults.get("prompt_rules"):
             lines.append("Every call:")
             lines += [f"- {r}" for r in defaults["prompt_rules"]]
@@ -120,13 +125,17 @@ def build_recipe_tips(registry: dict[str, Any] | None = None, topic: str = DEFAU
         sources = list(dict.fromkeys(defaults.get("sources", []) + [s for e in ops.values() for s in e.get("sources", [])]))
         lines.append("")
         lines.append("Sources: " + ", ".join(sources))
-        lines.append("Machine-readable: `warden recipes " + pname + " --json`; checked per call by `warden hook --claude` / "
-                     "`warden check-call`.")
+        lines.append("Machine-readable local policy: `warden recipes " + pname + " --json`. "
+                     "Enforcement depends on the actual interface/operation; external paths may bypass hooks. "
+                     "Provider docs or live schemas may conflict; verify scoped applicability before use.")
 
         tips.append({
-            "export_key": f"recipe:{pname}:v{version}",
+            "export_key": f"recipe:{pname}:{digest}",
+            "content_hash": digest,
+            "applicability": {"provider": pname, "registry_version": version, "registry_hash": digest, "transport": "local-contract; verify provider surface"},
+            "evidence_state": "local_policy_not_provider_verified",
             "topic_slug": topic,
-            "title": f"{label} generator recipes: start image, prompt rules, limits and gates (sprite-warden registry v{version})",
+            "title": f"{label} generator recipes: start image, prompt rules, limits and gates (sprite-warden registry v{version}; sha256 {digest})",
             "summary": (f"{label}'s documented rules for {', '.join(ops)} as data: what the start image must be, what never "
                         f"to write in a prompt, the argument limits, and the gates to pass before and after each call."),
             "problem": (f"Generator calls to {label} that ignore its own documentation (wrong start image, noise words in "
@@ -190,8 +199,17 @@ def publish_tips(
         raise ValueError(f"publishing needs the tipshare server command: set {TIPSHARE_CMD_ENV} to a JSON array")
     report: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
-    for tip in payloads:
+    for original in payloads:
+        tip = dict(original)
         key = tip.get("export_key")
+        if key and db is not None and key.startswith("recipe:"):
+            family = ":".join(key.split(":")[:2]) + ":"
+            with db._get_conn() as conn:
+                previous = conn.execute("SELECT tip_ref FROM tip_exports WHERE strategy_id LIKE ? AND strategy_id != ? AND tip_ref IS NOT NULL ORDER BY exported_at DESC, rowid DESC LIMIT 1", (family + "%", key)).fetchone()
+            if previous:
+                from uuid import UUID
+                UUID(previous["tip_ref"])  # Refuse ambiguous legacy numeric IDs.
+                tip["supersedes"] = previous["tip_ref"]
         if key and db is not None and not include_exported and db.is_tip_exported(key):
             report.append({"title": tip["title"], "export_key": key, "action": "skipped_exported"})
         else:
@@ -200,7 +218,7 @@ def publish_tips(
         return report
     if not command:
         return report + [{"title": t["title"], "export_key": t.get("export_key"), "action": "would_publish",
-                          "checked": False} for t in pending]
+                          "checked": False, "supersedes": t.get("supersedes")} for t in pending]
 
     if session_factory is None:
         from .mcp_probe import StdioSession
@@ -210,20 +228,33 @@ def publish_tips(
 
     with session_factory(command) as session:
         for tip in pending:
-            row: dict[str, Any] = {"title": tip["title"], "export_key": tip.get("export_key")}
+            row: dict[str, Any] = {"title": tip["title"], "export_key": tip.get("export_key"), "supersedes": tip.get("supersedes")}
             try:
                 found = session.call_tool("search", {"query": _search_query(tip["title"]),
                                                      "topic_slug": tip["topic_slug"], "limit": 25})
                 if tip["title"].strip().lower() in _titles(found):
-                    row["action"] = "skipped_existing"
+                    rows = found if isinstance(found, list) else found.get("results", found.get("tips", []))
+                    match = next(r for r in rows if r.get("title", "").strip().lower() == tip["title"].strip().lower())
+                    verified = session.call_tool("get_tip", {"tip_id": match["id"]})
+                    if verified.get("solution") != tip["solution"]:
+                        raise ValueError("Existing title has conflicting content; requires review")
+                    from uuid import UUID
+                    ref = str(UUID(verified["uuid"]))
+                    row.update(action="skipped_existing", tip_ref=ref, checked=True)
+                    if not dry_run and db is not None and tip.get("export_key"):
+                        db.record_tip_export(tip["export_key"], tip["topic_slug"], ref, utcnow())
                 elif dry_run:
                     row.update(action="would_publish", checked=True)
                 else:
                     sent = session.call_tool("share_tip", {k: tip[k] for k in TIP_FIELDS if tip.get(k) not in (None, "", [])})
-                    ref = None
-                    if isinstance(sent, dict):
-                        ref = sent.get("id") or sent.get("tip_id") or sent.get("uuid")
-                    row.update(action="published", tip_ref=str(ref) if ref is not None else None)
+                    if not isinstance(sent, dict) or not sent.get("id"):
+                        raise ValueError("No tip id in publish receipt; not marked exported")
+                    verified = session.call_tool("get_tip", {"tip_id": sent["id"]})
+                    if not isinstance(verified, dict) or verified.get("title") != tip["title"] or verified.get("solution") != tip["solution"]:
+                        raise ValueError("Publish readback mismatch; not marked exported")
+                    from uuid import UUID
+                    ref = str(UUID(verified["uuid"]))
+                    row.update(action="published", tip_ref=ref)
                     if db is not None and tip.get("export_key"):
                         db.record_tip_export(tip["export_key"], tip["topic_slug"], row["tip_ref"], utcnow())
             except Exception as exc:  # noqa: BLE001 - one tip failing must not stop or hide the others
@@ -233,10 +264,5 @@ def publish_tips(
 
 
 def mark_exported(payloads: list[dict[str, Any]], db: Any, tip_ref: str | None = None) -> int:
-    """Record tips as exported without sending them (they were published by hand)."""
-    count = 0
-    for tip in payloads:
-        if tip.get("export_key"):
-            db.record_tip_export(tip["export_key"], tip["topic_slug"], tip_ref, utcnow())
-            count += 1
-    return count
+    """Legacy entrypoint retained only to reject unverified export marking."""
+    raise ValueError("Blind marking is disabled; publish with a verified get_tip receipt instead")

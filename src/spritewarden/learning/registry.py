@@ -87,6 +87,23 @@ SEED_SOURCES: list[Source] = [
 ]
 
 
+def register_dependencies(db, provider, *, operation_docs=(), skill_paths=()):
+    """Explicit scoped dependency set; installed skills do not prove live capability."""
+    import hashlib
+    from pathlib import Path
+    sources=[]
+    for url in operation_docs:
+        sources.append(Source(id=provider+":operation:"+hashlib.sha256(url.encode()).hexdigest()[:16], provider=provider, kind="html", url=url, notes="Operation documentation; conflicts require review"))
+    for path in skill_paths:
+        p=Path(path).resolve()
+        if not p.is_file():
+            raise FileNotFoundError(p)
+        sources.append(Source(id=provider+":skill:"+hashlib.sha256(str(p).encode()).hexdigest()[:16], provider=provider, kind="file", url=str(p), notes="Installed skill revision; not evidence of connected server availability"))
+    for source in sources:
+        db.upsert_source(source)
+    return len(sources)
+
+
 def seed_sources(db: LearningDB) -> int:
     """Idempotently register the built-in source set. Returns the number seeded."""
     for source in SEED_SOURCES:

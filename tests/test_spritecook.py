@@ -118,12 +118,12 @@ def test_apply_palette_hex_list_and_size():
     body: dict = {}
     driver._apply_palette(body, _recipe())
     assert isinstance(body["colors"], list)
-    assert len(body["colors"]) == 16
+    assert len(body["colors"]) == 8  # reviewed API cap, not the local snap palette
     assert all(c.startswith("#") for c in body["colors"])
 
     anim_body: dict = {}
     driver._apply_palette(anim_body, _recipe(), palette_size=True)
-    assert anim_body["colors"] == 16
+    assert anim_body["colors"] == 8
 
 
 def test_common_param_mapping():
@@ -181,7 +181,7 @@ def test_generate_still_end_to_end(tmp_path, fake_http):
 def test_generate_animation_prefers_spritesheet(tmp_path, fake_http):
     driver = SpriteCookDriver(api_key="k")
     recipe = _recipe(
-        operation="animate_character_v3",
+        operation="animate_game_art",
         params={"asset_id": "asset-1", "frames": 8},
     )
     out = driver.generate(recipe, tmp_path)
@@ -193,7 +193,7 @@ def test_generate_animation_prefers_spritesheet(tmp_path, fake_http):
 
 def test_animation_requires_asset_id(tmp_path, fake_http):
     driver = SpriteCookDriver(api_key="k")
-    out = driver.generate(_recipe(operation="animate_character_v3", params={}), tmp_path)
+    out = driver.generate(_recipe(operation="animate_game_art", params={}), tmp_path)
     assert out.success is False
     assert "asset_id" in out.error
 
