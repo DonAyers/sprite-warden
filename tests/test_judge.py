@@ -105,7 +105,9 @@ def test_vision_judge_orchestration():
     card = evaluate_still(img, "luap-40")
     judge = VisionJudge()
     verdict = judge.orchestrate_judgment(card, img, prompt_description="steel cube")
-    assert verdict.recommended_action in ("accept", "palette_remap", "inpaint_part", "reroll")
+    assert verdict.recommended_action == 'review'
+    assert verdict.decision_status == 'unknown'
+    assert not verdict.passed
     assert 0.0 <= verdict.production_ready_prob <= 1.0
 
 

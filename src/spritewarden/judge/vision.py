@@ -216,6 +216,7 @@ class OrchestratedVerdict(BaseModel):
     passed: bool
     confidence: float
     production_ready_prob: float
+    decision_status: str = 'unknown'
     recommended_action: str  # "accept" | "palette_remap" | "retime_stalls" | "inpaint_part" | "reroll"
     quality_score: float
     vision_observation: VisionObservation | None = None
@@ -684,7 +685,10 @@ Only return valid JSON."""
             primitive="noul",
             question_id="production_ready",
         )
-        prod_ready_prob = float(noul_res.decision) if isinstance(noul_res.decision, (int, float)) else 0.8
+        known = (not noul_res.used_fallback and not noul_res.error
+                 and isinstance(noul_res.decision, (int,float)) and not isinstance(noul_res.decision,bool)
+                 and 0 <= noul_res.decision <= 1)
+        prod_ready_prob = float(noul_res.decision) if known else 0.0
 
         action_criteria = {
             "accept": "Asset passes all gates and visual inspections cleanly",
@@ -699,7 +703,10 @@ Only return valid JSON."""
             options=action_criteria,
             question_id="remediation_action",
         )
-        recommended_action = str(choice_res.decision)
+        action_known = (not choice_res.used_fallback and not choice_res.error
+                        and choice_res.decision in action_criteria)
+        recommended_action = str(choice_res.decision) if action_known else 'review'
+        known = known and action_known
 
         hard_fail: list[str] = []
         if looked:
@@ -710,9 +717,11 @@ Only return valid JSON."""
         if hard_fail and recommended_action == "accept":
             recommended_action = "inpaint_part" if observation.perspective_match else "reroll"
 
-        passed = (prod_ready_prob >= 0.7) and still_scorecard.passed and not hard_fail
+        passed = known and recommended_action == 'accept' and (prod_ready_prob >= 0.7) and still_scorecard.passed and not hard_fail
         if hard_fail:
             summary = f"Asset rejected by vision [{recommended_action}]: " + " | ".join(hard_fail)
+        elif not known:
+            summary = f'Asset requires owner review; Jev decision unavailable/unassessed: {still_scorecard.summary}'
         elif passed:
             summary = f"Asset approved ({prod_ready_prob * 100:.0f}% confidence): {observation.visual_smell_test_notes}"
         else:
@@ -721,7 +730,8 @@ Only return valid JSON."""
 
         return OrchestratedVerdict(
             passed=passed,
-            confidence=noul_res.confidence,
+            confidence=noul_res.confidence if known and noul_res.confidence is not None else 0.0,
+            decision_status='assessed' if known else 'unknown',
             production_ready_prob=prod_ready_prob,
             recommended_action=recommended_action,
             quality_score=round(prod_ready_prob * still_scorecard.score, 2),

@@ -481,6 +481,22 @@ def judge_animation(
 
 
 @mcp.tool()
+def preflight_repair(project_root: str, plan: dict, ask_jev: bool = False,
+                     authorize_decision_spend: bool = False) -> dict:
+    """Inspect repair intent, scope, real pixel differences and failed attempts before any edit.
+
+    Default is read-only and free. Optional Jev advice requires explicit authorization
+    for ONE decision query only; it never authorizes generation, acceptance or publication.
+    Plan schema: source, goal, defect_kind, proposed_action; optional candidate, mask,
+    required_regions {name:[x,y,width,height]}, preserved_regions, available_actions,
+    spend_cap_usd, quoted_costs, request_fingerprint, attempts and max_paid_attempts.
+    Do not treat a missing model decision or an assessment dispute as approval.
+    """
+    from ..repair_preflight import inspect_plan
+    return inspect_plan(project_root,plan,ask_jev=ask_jev,authorize_decision_spend=authorize_decision_spend)
+
+
+@mcp.tool()
 def inspect_workflow(project_root: str, character_dir: str) -> dict:
     """Inspect current revisions and readiness without spending or promoting."""
     from ..workflow import inspect

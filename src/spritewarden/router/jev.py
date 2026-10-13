@@ -26,9 +26,10 @@ def _get_openrouter_key() -> str:
 class DecisionOutcome(BaseModel):
     """The result of a Jev decision query."""
     question_id: str
-    decision: str | bool | float
+    decision: str | bool | float | None = None
     probabilities: dict[str, float] = Field(default_factory=dict)
-    confidence: float = 1.0
+    confidence: float | None = None
+    error: str | None = None
     used_fallback: bool = False
     cost_usd: float | None = None
 
@@ -98,11 +99,25 @@ class JevClient:
                     else:
                         val = ans.get("score")
 
+                    import math
+                    def number(value, maximum):
+                        return (isinstance(value,(int,float)) and not isinstance(value,bool)
+                                and math.isfinite(value) and 0 <= value <= maximum)
+                    allowed = q_obj.get('criteria', {})
+                    valid = (isinstance(val,str) and val in allowed) if q_type == 'choice' else number(val,1 if q_type=='noul' else 4)
+                    confidence = ans.get('confidence')
+                    probabilities = ans.get('probabilities', {})
+                    valid = (valid and (confidence is None or number(confidence,1))
+                             and isinstance(probabilities,dict)
+                             and all(number(p,1) for p in probabilities.values()))
+                    if not valid:
+                        return DecisionOutcome(question_id=question_id,cost_usd=cost,error='missing or invalid typed decision answer')
                     return DecisionOutcome(
                         question_id=question_id,
-                        decision=val if val is not None else True,
-                        probabilities=ans.get("probabilities", {}),
-                        confidence=ans.get("confidence", 1.0),
+                        decision=val,
+                        probabilities=ans.get("probabilities", {}) if val is not None else {},
+                        confidence=ans.get("confidence") if val is not None else None,
+                        error='missing decision answer' if val is None else None,
                         used_fallback=False,
                         cost_usd=cost,
                     )
@@ -119,42 +134,9 @@ class JevClient:
         primitive: str,
         options: list[str] | None,
     ) -> DecisionOutcome:
-        """Deterministic local decision when offline or unauthenticated."""
-        if primitive == "choice" and options:
-            # Simple heuristic on state
-            req_type = state.get("asset_type", "")
-            if "vehicle" in req_type or state.get("is_vehicle"):
-                chosen = "sprite_fusion" if "sprite_fusion" in options else options[0]
-            elif "tile" in req_type:
-                chosen = "pixellab" if "pixellab" in options else options[0]
-            elif "turnaround" in req_type or "concept" in req_type:
-                chosen = "openrouter_image" if "openrouter_image" in options else options[0]
-            elif "icon" in req_type:
-                chosen = "spritecook" if "spritecook" in options else options[0]
-            else:
-                chosen = options[0]
-            return DecisionOutcome(
-                question_id=question_id,
-                decision=chosen,
-                probabilities={chosen: 0.9},
-                confidence=0.9,
-                used_fallback=True,
-            )
-        elif primitive == "noul":
-            return DecisionOutcome(
-                question_id=question_id,
-                decision=True,
-                probabilities={"yes": 0.85, "no": 0.15},
-                confidence=0.85,
-                used_fallback=True,
-            )
-        else:
-            return DecisionOutcome(
-                question_id=question_id,
-                decision=0.85,
-                confidence=0.85,
-                used_fallback=True,
-            )
+        """Unknown is not a model decision. Routing rules remain separate in route_generation."""
+        return DecisionOutcome(question_id=question_id, used_fallback=True,
+                               error='decision service unavailable; no approval or model confidence')
 
     def route_generation(
         self,
@@ -196,6 +178,6 @@ class JevClient:
             is_animation=is_animation,
             is_vehicle_or_rigid=is_vehicle_or_rigid,
         )
-        if not outcome.used_fallback:
+        if not outcome.used_fallback and not outcome.error and outcome.decision in criteria:
             recipe = recompile_recipe(recipe, str(outcome.decision))
         return recipe

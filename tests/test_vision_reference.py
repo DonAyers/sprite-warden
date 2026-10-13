@@ -256,6 +256,10 @@ def test_orchestrated_verdict_hard_fails_on_anomalies(monkeypatch):
     verdict = judge.orchestrate_judgment(card, _sprite())
     assert verdict.passed is False and "perspective" in verdict.reasoning_summary
 
-    # The offline stub never looked, so it cannot hard-fail; the deterministic verdict stands.
+    # Technical still gates stand, but an unavailable decision cannot invent production approval.
     monkeypatch.setattr(judge, "view_and_inspect", lambda **kw: VisionObservation(model_used="offline_stub"))
-    assert judge.orchestrate_judgment(card, _sprite()).passed is True
+    verdict = judge.orchestrate_judgment(card, _sprite())
+    assert verdict.passed is False
+    assert verdict.decision_status == 'unknown'
+    assert verdict.recommended_action == 'review'
+    assert card.passed is True

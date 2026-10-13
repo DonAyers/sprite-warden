@@ -14,7 +14,10 @@ FAST_COMMANDS = ("hook", "check-call", "rules", "pipeline")
 
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] == "publish":
+    if args and args[0] == 'repair-plan':
+        from .repair_preflight_cli import main as repair_plan_main
+        sys.exit(repair_plan_main(args[1:]))
+    if args and args[0] == 'publish':
         from .publication_cli import main as publish_main
         sys.exit(publish_main(args[1:]))
     if args and args[0] == "workflow":
