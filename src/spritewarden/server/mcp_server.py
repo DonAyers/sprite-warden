@@ -344,10 +344,11 @@ def judge_direction_set(
     palette: Annotated[str | None, Field(description="Target palette to check, or null to skip")] = "luap-40",
     character_id: Annotated[str | None, Field(description="CharacterIdentity slug; sided marker features (e.g. 'left hand wrench' with marker_hex) enable the tool-side check")] = None,
     write_gate_record: Annotated[bool, Field(description="Write <image>.gate.json beside each view (or the strip)")] = True,
-    vision: Annotated[bool, Field(description="Also compare EVERY view with the anchor by vision model (one PAID call per view): invented parts and parts missing though they should be visible FAIL; parts hidden by the turn do not. Writes gate vision_reference into each view's record. Offline = FAIL.")] = False,
+    vision: Annotated[bool, Field(description="Compare views against anchor; exact completed evidence is reused, cache misses are paid. Invented/missing-visible parts fail; expected occlusion does not. Fresh unavailable evidence fails.")] = False,
     vision_model: Annotated[str, Field(description="Vision model slug")] = DEFAULT_VISION_MODEL,
     area_tolerance: Annotated[float, Field(description="Opaque-area tolerance, finite in [0, 1); also symmetric max/min east/west difference with an identity profile policy")] = 0.20,
     description: Annotated[str, Field(description="Subject description for the vision comparison")] = "",
+    refresh_vision: Annotated[bool, Field(description="Explicit paid recheck; report-only, requires write_gate_record=false. Prior default evidence is preserved.")] = False,
     anchor_facing: Annotated[str, Field(description="Facing of the external anchor (default south); profile anchors must be explicitly east or west")] = "south",
 ) -> dict:
     """Cross-view gate for a direction set: same ground row (+-1), drawn height (+-2px), opaque area (+-20%), equal component count (extra parts are named), tool side per facing, palette."""
@@ -357,6 +358,8 @@ def judge_direction_set(
     from ..judge import check_direction_set, load_direction_frames
     from ..judge.views import direction_frame_files
 
+    if refresh_vision and (write_gate_record or not vision):
+        raise ValueError('Vision refresh is report-only: requires vision=true and write_gate_record=false')
     identity = get_catalog().get_identity(character_id) if character_id else None
     frames = load_direction_frames(source_path, cell=cell_size)
     anchor = Image.open(anchor_path).convert("RGBA") if anchor_path else None
@@ -387,7 +390,7 @@ def judge_direction_set(
         vision_gates = compare_views_to_anchor(
             frames, vision_anchor, VisionJudge(vision_model=vision_model), anchor_facing=anchor_facing, skip_anchor_view=skip,
             description=description or str(pipeline.get("description") or "") or (identity.prompt_description if identity is not None else ""),
-            faces=faces,
+            faces=faces, refresh=refresh_vision,
         )
         vision_gate = vision_summary_gate(vision_gates)
         out["vision_reference"] = {"summary": vision_gate.model_dump(),

@@ -22,6 +22,8 @@ from .models import GateResult, StillScorecard
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_VISION_MODEL = "google/gemini-2.5-flash"
+# Greedy sampling reduces noise; provider/hardware/model changes can still be nondeterministic.
+VISION_SAMPLING = {"temperature": 0, "top_p": 1}
 OFFLINE_ENV = "SPRITEWARDEN_OFFLINE"
 BOARD_BG = (109, 161, 138)  # #6da18a
 
@@ -80,6 +82,8 @@ class ReferenceComparison(BaseModel):
     the character turned (``expected_hidden_parts``) are informational and never fail.
     """
     status: str  # match | mismatch | unavailable | error
+    request_fingerprint: str | None = None
+    request_audit: dict[str, Any] = Field(default_factory=dict)
     model_used: str = ""
     anchor_facing: str | None = None
     candidate_facing: str | None = None
@@ -292,16 +296,20 @@ def reference_prompt(
     turned view against; without it, "is this bolt on the back invented?" is a guess.
     """
     turned = candidate_facing != anchor_facing
-    declared = {k: str(v).strip() for k, v in (faces or {}).items() if str(v or "").strip()}
+    declared = {k: str(v).strip() for k, v in (faces or {}).items()
+                if not str(k).startswith('_') and str(v or "").strip()}
     faces_text = ""
     if declared:
         faces_text = (
             "\nTHE APPROVED DESIGN OF THE FACES THE ANCHOR DOES NOT SHOW (the designer's own words; this is the "
             "whole design of those faces):\n"
             + "\n".join(f"- {name}: {text}" for name, text in declared.items())
-            + "\nAnything drawn on those faces that this description does not cover is an INVENTED part, however "
-              "plausible it looks. A face described as plain must be plain: a lamp, boss, bolt, vent or panel line "
-              "on it is invented."
+            + "\nThis declared face design takes precedence over absence from the anchor: the anchor cannot show every surface. "
+              "These are regional descriptions, NOT a checklist required in every facing. "
+              "A declared bolt, boss or panel is not invented merely because it is hidden in the anchor. "
+              "Parts on an opposite/hidden face are HIDDEN, not missing. Do not require a complete "
+              "layout on a partially visible face. An explicitly plain visible face must be plain. "
+              "Only positively visible contradictions are evidence of invention; uncertainty is not proof."
         )
     turn_text = (
         f"The ANCHOR shows the character facing {anchor_facing}. The CANDIDATE should be the SAME character turned to "
@@ -311,19 +319,40 @@ def reference_prompt(
         if turned else
         f"Both images should show the same character facing {anchor_facing} from the same camera."
     )
+    facing_key = candidate_facing.replace('-', '_').lower()
+    if facing_key == 'north':
+        visibility = 'FRONT: hidden; BACK: visible'
+    elif facing_key.startswith('north_'):
+        visibility = 'FRONT: hidden; BACK: partially visible'
+    elif facing_key.startswith('south'):
+        visibility = 'FRONT: visible or partially visible; BACK: hidden'
+    elif facing_key in {'east', 'west'}:
+        visibility = 'FRONT: edge-on or occluded; BACK: edge-on or occluded'
+    else:
+        visibility = 'FRONT/BACK: unresolved; do not infer missing parts from a facing label alone'
+    visibility_text = (
+        f'Conservative surface guidance for {candidate_facing}: {visibility}. '
+        'This is not a geometric visibility measurement. On a diagonal, far corners may be occluded; '
+        'do not demand all four corner bolts or every panel line. In profile do not require a complete back panel. '
+        'Left/right face names refer to physical surfaces, not image-left/image-right; do not silently reinterpret '
+        'ambiguous designer wording. This guidance concerns surface decoration, not automatic hiding of entire '
+        'limbs or protruding held tools. If visibility is uncertain, put that uncertainty in notes, not missing_visible_parts.'
+    )
     return f"""You are a pixel-art art director checking a sprite against its approved design, on one board.
 LEFT = ANCHOR (the approved design). RIGHT = CANDIDATE.
 Subject: {description or 'game character'}. Expected camera: {expected_perspective}.
 {turn_text}{faces_text}
+{visibility_text}
 
 Answer these questions in order.
 
 1. INVENTED PARTS (the main question). Look at every element drawn in the CANDIDATE: bolts, bosses, rivets,
    lights, eyes, handles, antennae, vents, panels, logos, extra limbs, extra wheels, orbs, floating fragments.
-   For each one ask: does this element have a counterpart ANYWHERE on the anchor's design (also on a side the
-   anchor does not show but clearly implies)? List every element that does NOT: the generator made it up.
-   Give its location on the sprite and a size estimate. A round boss or bolt on the back or the sides of the
-   head that the anchor's head does not have is an invented part.
+   For each one ask whether it contradicts the anchor's VISIBLE design or the applicable declared face design.
+   Treat both as complementary evidence; unseen surfaces are not specified by absence from the anchor.
+   A bolt, boss or panel explicitly described for an unseen face is allowed on that face, not invented.
+   List only a positively identified extra/contradictory element, with location and size. Do not infer an
+   entire unseen face is plain or require new parts simply from a different turn.
 2. MISSING PARTS. List parts of the anchor's design that SHOULD be visible from the candidate's facing
    ({candidate_facing}) but are not drawn. Never list a part here because the turn hides it.
 3. CHANGED PARTS. Parts present in both whose size, colour or material changed.
@@ -361,9 +390,11 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
     if comparison.status == "error":
         return GateResult(
             name="vision_reference", passed=False, score=0.0,
-            summary=f"Reference comparison failed: {comparison.notes}",
+            summary=f"Reference assessment error (not an artistic mismatch): {comparison.notes}",
             errors=[f"error: {comparison.notes}"],
-            metrics={"status": "error", "model": comparison.model_used},
+            metrics={"status": "error", "assessment": "not_assessed", "model": comparison.model_used,
+                     "cost_usd": comparison.cost_usd, "request_fingerprint": comparison.request_fingerprint,
+                     "request": comparison.request_audit},
         )
     # The verdict rule: invented parts, parts missing though they should be visible, another
     # character, or a camera more than ~15 degrees off. Occlusion by the turn never fails.
@@ -407,6 +438,8 @@ def reference_gate(comparison: ReferenceComparison, facing: str | None = None) -
         warnings=warnings,
         metrics={
             "status": comparison.status,
+            "request_fingerprint": comparison.request_fingerprint,
+            "request": comparison.request_audit,
             "model": comparison.model_used,
             "invented_parts": len(comparison.invented_parts),
             "missing_visible_parts": len(comparison.missing_visible_parts),
@@ -454,6 +487,7 @@ class VisionJudge:
             "model": self.vision_model,
             "messages": [{"role": "user", "content": content}],
             "response_format": {"type": "json_object"},
+            **VISION_SAMPLING,
         }
         try:
             with httpx.Client(timeout=self.timeout) as client:
@@ -466,8 +500,13 @@ class VisionJudge:
                 return None, None, f"HTTP {resp.status_code}: {resp.text[:200]}"
             data = resp.json()
             raw_text = data["choices"][0]["message"]["content"]
-            parsed = json.loads(raw_text)
             cost = (data.get("usage") or {}).get("cost")
+            try:
+                parsed = json.loads(raw_text)
+            except (json.JSONDecodeError, TypeError) as exc:
+                return None, cost, f"invalid_json: {exc}"
+            if not isinstance(parsed, dict):
+                return None, cost, 'invalid_json: expected a JSON object'
             return parsed, cost, None
         except Exception as e:  # noqa: BLE001
             return None, None, str(e)
@@ -530,7 +569,17 @@ Only return valid JSON."""
             cost_usd=cost,
         )
 
-    def compare_to_reference(
+    def compare_to_reference(self, candidate, reference, *, facing=None, anchor_facing='south', description='',
+                             expected_perspective='low top-down (approx 20-30 degrees)', zoom=6, faces=None, refresh=False):
+        from .reference_cache import compare
+        faces = {k: str(v).strip() for k, v in (faces or {}).items()
+                 if not str(k).startswith('_') and str(v or '').strip()} or None
+        params = dict(facing=facing, anchor_facing=anchor_facing, description=description,
+                      expected_perspective=expected_perspective, zoom=zoom, faces=faces)
+        return compare(self, candidate, reference, params,
+                       lambda: self._compare_to_reference(candidate, reference, **params), refresh=refresh)
+
+    def _compare_to_reference(
         self,
         candidate: Image.Image,
         reference: Image.Image,
@@ -572,8 +621,23 @@ Only return valid JSON."""
         ]
         parsed, cost, err = self._chat_json(content)
         if err or not isinstance(parsed, dict):
-            return ReferenceComparison(status="error", model_used=self.vision_model, notes=err or "unparseable response")
+            return ReferenceComparison(status="error", model_used=self.vision_model, cost_usd=cost, notes=err or "unparseable response")
 
+        if (not isinstance(parsed.get('invented_parts'), list)
+                or not isinstance(parsed.get('missing_visible_parts'), list)
+                or not isinstance(parsed.get('same_character'), bool)):
+            return ReferenceComparison(status='error',model_used=self.vision_model,cost_usd=cost,
+                                       notes='invalid_schema: invented_parts/missing_visible_parts lists and same_character boolean required')
+        for field in ('invented_parts', 'missing_visible_parts', 'changed_parts', 'expected_hidden_parts'):
+            if field not in parsed:
+                continue
+            findings = parsed[field]
+            # Use the established aliases and acceptance rules, but never silently drop a finding.
+            if not isinstance(findings, list) or len(_part_notes(findings)) != len(findings):
+                return ReferenceComparison(
+                    status='error', model_used=self.vision_model, cost_usd=cost,
+                    notes=f'invalid_schema: {field} must be a list of non-empty part notes',
+                )
         return parse_reference_response(
             parsed, model=self.vision_model, cost=cost, facing=candidate_facing, anchor_facing=anchor_facing
         )

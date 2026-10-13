@@ -321,6 +321,7 @@ def compare_views_to_anchor(
     description: str = "",
     expected_perspective: str = "low top-down (approx 20-30 degrees)",
     faces: dict[str, str] | None = None,
+    refresh: bool = False,
 ) -> dict[str, GateResult]:
     """Reference-aware vision for every view of a set: facing -> ``vision_reference`` gate.
 
@@ -341,6 +342,8 @@ def compare_views_to_anchor(
         if skip_anchor_view and facing == anchor_canon:
             continue
         extra = {"faces": faces} if faces else {}
+        if refresh:
+            extra['refresh'] = True
         comparison = judge.compare_to_reference(
             img, anchor, facing=facing, anchor_facing=anchor_canon,
             description=description, expected_perspective=expected_perspective, **extra,
@@ -352,17 +355,23 @@ def compare_views_to_anchor(
 def vision_summary_gate(per_view: dict[str, GateResult]) -> GateResult:
     """One ``vision_reference`` gate for a whole set (a strip has a single record)."""
     failed = {f: g for f, g in per_view.items() if not g.passed}
+    unassessed = {f: g for f, g in per_view.items() if g.metrics.get('status') in {'error','unavailable'}}
+    mismatches = [f for f in failed if f not in unassessed]
+    status = ('error' if any(g.metrics.get('status')=='error' for g in unassessed.values())
+              else 'unavailable' if unassessed or not per_view else 'mismatch' if mismatches else 'match')
     errors = [f"{f}: {e}" for f, g in failed.items() for e in g.errors[:3]]
     return GateResult(
         name="vision_reference",
         passed=not failed and bool(per_view),
         score=round(sum(g.score for g in per_view.values()) / len(per_view), 3) if per_view else 0.0,
         summary=(f"All {len(per_view)} view(s) match the anchor" if per_view and not failed
-                 else (f"{len(failed)} of {len(per_view)} view(s) differ from the anchor: {', '.join(failed)}"
-                       if per_view else "No views were compared")),
+                 else (f"{len(mismatches)} mismatch view(s): {', '.join(mismatches) or 'none'}; "
+                       f"{len(unassessed)} unassessed view(s): {', '.join(unassessed) or 'none'}"
+                       if per_view else "No views were compared; unassessed")),
         errors=errors or ([] if per_view else ["no views compared"]),
         warnings=[f"{f}: {w}" for f, g in per_view.items() for w in g.warnings[:3]],
-        metrics={"views": {f: g.passed for f, g in per_view.items()}},
+        metrics={"views": {f: g.passed for f, g in per_view.items()},'status':status,
+                 'mismatch_views':mismatches,'unassessed_views':list(unassessed)},
     )
 
 

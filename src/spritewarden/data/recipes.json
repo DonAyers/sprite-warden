@@ -3,7 +3,7 @@
   "source_document": "i-require-maintenance/docs/pipeline-audit.md section 2 (research pass 2026-10-06)",
   "gate_names": [
     "start_image", "direction_set", "pixel_grid", "palette_adherence", "clipping", "symmetry",
-    "loop_smoothness", "animation_anomalies", "walk_mechanics", "vision_reference"
+    "loop_smoothness", "animation_anomalies", "walk_mechanics", "vision_reference", "publication_readback"
   ],
   "pipeline_rules": [
     "One anchor: every view and motion of a character derives from ONE gated south image, recorded in its pipeline.json.",
@@ -236,6 +236,17 @@
           "required_gates_after": ["pixel_grid", "palette_adherence", "clipping"],
           "asset_id_params": ["character_id"],
           "notes": ["The character's 8 views must be a gated set before any state or motion derives from them."],
+          "sources": ["https://api.pixellab.ai/mcp/docs"]
+        },
+        "save_to_asset": {
+          "aliases": [],
+          "description": "Free native publication/replacement, not generation. Initially restricted to registered character rotation targets with durable reviewed source/upload authorization.",
+          "start_image": null,
+          "required_gates_before": [],
+          "required_gates_after": ["publication_readback"],
+          "prompt_rules": ["Use warden publish prepare to bind exact upload, target, ready local evidence and human authorization; verify provider readback after native MCP save."],
+          "enforce": {"mutation": "publication", "rules": [{"kind": "publication_authorization"}]},
+          "notes": ["No Warden generation adapter. Native MCP only. Gallery, object and animation targets remain unsupported by this validation contract."],
           "sources": ["https://api.pixellab.ai/mcp/docs"]
         },
         "reduce_colors": {

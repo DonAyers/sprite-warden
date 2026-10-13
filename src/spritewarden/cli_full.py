@@ -352,6 +352,9 @@ def cmd_judge_still(args: argparse.Namespace) -> int:
 
 @judgment_operation
 def cmd_judge_views(args: argparse.Namespace) -> int:
+    if getattr(args, 'refresh_vision', False) and (not getattr(args, 'no_record', False) or not args.vision):
+        print('Vision refresh is report-only: use --vision --refresh-vision --no-record')
+        return 2
     from PIL import Image
 
     from .judge import check_direction_set, load_direction_frames
@@ -410,7 +413,7 @@ def cmd_judge_views(args: argparse.Namespace) -> int:
             description=(getattr(args, "desc", "") or pipeline_desc
                          or (identity.prompt_description if identity is not None else "")),
             expected_perspective=args.perspective,
-            faces=faces,
+            faces=faces, refresh=getattr(args, 'refresh_vision', False),
         )
         vision_gate = vision_summary_gate(vision_gates)
     overall = bool(gate.passed) and (vision_gate is None or vision_gate.passed)
@@ -554,6 +557,8 @@ def cmd_review_check(args: argparse.Namespace) -> int:
     if report["ok"]:
         console.print(f"[bold green]Review check passed:[/] {report['checked']} file(s) carry a current passed "
                       f"{' / '.join(required)} record")
+        for entry in report.get('accepted', []):
+            console.print(escape(f"{entry['path']}: {entry['gate']} accepted by {entry['actor']}: {entry['reason']}"))
         return 0
     if not report["checked"]:
         console.print("[bold red]Review check failed:[/] no image files found")
@@ -787,6 +792,18 @@ def cmd_stage(args: argparse.Namespace) -> int:
     except ValueError as exc:
         console.print(f"[bold red]Stage error:[/] {escape(str(exc))}")
         return 1
+
+
+def cmd_accept(args: argparse.Namespace) -> int:
+    from .gates.acceptance import accept
+    try:
+        decisions = accept([args.path], actor=args.by, reason=args.reason, gate=args.gate)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(f"[bold red]Acceptance refused:[/] {escape(str(exc))}")
+        return 1
+    for entry in decisions:
+        console.print(escape(f"{entry['image']}: {entry['gate']} accepted by {entry['actor']}: {entry['reason']}"))
+    return 0
 
 
 def cmd_reject(args: argparse.Namespace) -> int:
@@ -1460,13 +1477,14 @@ def main(argv: list[str] | None = None) -> None:
     p_views.add_argument("--height-tolerance", type=int, default=2, help="Allowed drawn-height difference in px (default 2)")
     p_views.add_argument("--area-tolerance", type=float, default=0.20, help="Allowed opaque-area ratio difference (default 0.20)")
     p_views.add_argument("--vision", action="store_true",
-                         help="Also compare EVERY view with the anchor by vision model (one paid call per view): invented "
-                              "parts and parts missing though they should be visible FAIL, parts hidden by the turn do "
-                              "not; writes gate vision_reference into each view's record. Offline = FAIL")
+                         help="Compare views with the anchor using exact cached evidence where available; cache misses are paid. "
+                              "Invented/missing-visible parts fail; expected occlusion does not. "
+                              "Writes vision_reference records; fresh unavailable evidence fails.")
     p_views.add_argument("--vision-model", default=DEFAULT_VISION_MODEL, help=f"Vision model slug (default: {DEFAULT_VISION_MODEL})")
     p_views.add_argument("--anchor-facing", default="south", help="Facing of the anchor image (default south)")
     p_views.add_argument("--desc", help="Subject description for the vision comparison (default: the identity's)")
     p_views.add_argument("--perspective", default="low top-down", help="Expected camera perspective")
+    p_views.add_argument("--refresh-vision", action="store_true", help="Explicit paid recheck; report-only, requires --vision --no-record; keeps prior default evidence")
     p_views.add_argument("--no-record", action="store_true", help="Do not write <image>.gate.json records")
     p_views.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_views.set_defaults(func=cmd_judge_views)
@@ -1515,6 +1533,13 @@ def main(argv: list[str] | None = None) -> None:
     p_stage.add_argument("--scale", type=int, default=3, help="Contact sheet scale (default 3 = the game at 1080p)")
     p_stage.add_argument("--vision-model", default=DEFAULT_VISION_MODEL)
     p_stage.set_defaults(func=cmd_stage)
+
+    p_accept = subparsers.add_parser("accept", help="Accept completed artistic vision findings, never pixel failures or missing evidence")
+    p_accept.add_argument("path", help="Image or direction-set directory")
+    p_accept.add_argument("--by", required=True, help="Name of the human who reviewed the evidence")
+    p_accept.add_argument("--reason", required=True, help="The human's explicit artistic review rationale")
+    p_accept.add_argument("--gate", choices=["vision_reference"], default="vision_reference")
+    p_accept.set_defaults(func=cmd_accept)
 
     # reject / rejections (the log of every failed gate and every human "no")
     p_rej = subparsers.add_parser("reject", help="Record a person's rejection of image(s): logged, and the images "

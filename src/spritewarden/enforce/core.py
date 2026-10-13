@@ -48,6 +48,7 @@ RULE_KINDS = (
     "loop_engine",
     "require_arg_value",
     "matte_collision",
+    "publication_authorization",
 )
 UMBRELLA_GATES = ("still", "start_image", "views", "anim")
 GATE_ALIASES = {"direction_set": "views", "views": "direction_set"}
@@ -870,7 +871,13 @@ def _rule_matte_collision(rule, call, sources, cfg, reg) -> list[str]:
     return []
 
 
+def _rule_publication_authorization(rule, call, sources, cfg, reg):
+    from ..publication import reasons
+    return reasons(cfg.root, call.args)
+
+
 _RULES: dict[str, Callable[..., list[str]]] = {
+    "publication_authorization": _rule_publication_authorization,
     "max_items": _rule_max_items,
     "forbid_args": _rule_forbid_args,
     "enum": _rule_enum,
@@ -897,6 +904,9 @@ def _evaluate(call: _Call, cfg: ProjectConfig, reg: dict[str, Any]) -> list[str]
         reasons += fn(rule, call, sources, cfg, reg)
     reasons += source_reasons
     stage = _enforce(call.entry).get("stage")
+    if call.provider == 'pixellab' and stage == 'animation' and call.args.get('character_id'):
+        from ..publication import character_sync_reasons
+        reasons += character_sync_reasons(cfg.root, call.args['character_id'])
     if stage and not sources and not source_reasons:
         reasons.append(f"{call.provider}/{call.operation} requires a source image or registered source identity.")
     needed = accepted_gates((call.entry or {}).get("required_gates_before"), stage)
@@ -1038,7 +1048,10 @@ def _recipe_context(call: _Call) -> str:
     defaults = call.prov.get("defaults") or {}
     rules = list(entry.get("prompt_rules", []))
     rules += [r for r in defaults.get("prompt_rules", []) if r not in rules]
-    lines = [f"GENERATOR CALL ({call.provider} / {call.operation}): check it against the recipe before it spends."]
+    if _enforce(entry).get('mutation') == 'publication':
+        lines = [f"PUBLICATION CALL ({call.provider} / {call.operation}): replaces existing remote content; reviewed authorization required."]
+    else:
+        lines = [f"GENERATOR CALL ({call.provider} / {call.operation}): check it against the recipe before it spends."]
     if entry.get("description"):
         lines.append(str(entry["description"]))
     si = entry.get("start_image") or {}
@@ -1100,6 +1113,8 @@ def _rejection_context(calls: list[_Call], cfg: ProjectConfig) -> str:
 def _finish(provider: str, operation: str, reasons: list[str], cfg: ProjectConfig, context: str) -> Verdict:
     if not reasons:
         return Verdict("allow", provider, operation, [], context)
+    if provider == 'pixellab' and (operation == 'save_to_asset' or any(r.startswith('remote character sync:') for r in reasons)):
+        return Verdict('deny', provider, operation, reasons, '')
     why = _take_override(cfg)
     if why is None:
         return Verdict("deny", provider, operation, reasons, "")

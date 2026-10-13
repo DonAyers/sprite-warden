@@ -101,6 +101,8 @@ class GalleryRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ValueError('JSON object required')
             parts = urlsplit(self.path)
+            if parts.path == '/api/repair' and self.command == 'POST':
+                return self._json(self.data.repair(payload))
             if parts.path == '/api/decisions' and self.command == 'POST':
                 return self._json(self.data.decide(payload))
             if parts.path == '/api/projects' and self.command == 'POST':
@@ -166,6 +168,8 @@ class GalleryRequestHandler(BaseHTTPRequestHandler):
         if not segments:
             return self._static("index.html")
         head = segments[0]
+        if head == 'repair' and len(segments) == 1:
+            return self._static('repair.html')
         if head == 'review' and len(segments) == 1:
             return self._static('review.html')
 
@@ -182,6 +186,8 @@ class GalleryRequestHandler(BaseHTTPRequestHandler):
     def _api(self, segments: list[str], query: dict[str, str]) -> None:
         data = self.data
         name = segments[0] if segments else ""
+        if name == 'repair':
+            return self._json(data.repair_source(query.get('asset_id')))
         if name == 'revision-image':
             path = data.revision_image(query.get('pipeline_id'), query.get('revision_id'), query.get('facing'))
             return self._send(path.read_bytes(), 'image/png')

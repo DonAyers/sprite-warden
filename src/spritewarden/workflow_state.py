@@ -274,7 +274,7 @@ def _readiness(root, state, rev, seen=None):
             # Only named artistic measurements can be waived, never missing evidence/contracts.
             if latest.get('decision') == 'accepted_with_exception' and latest.get('operation') == rev['operation']:
                 gate = latest['gate']
-                remaining = [r for r in remaining if r not in {gate + ' failed or unavailable', gate + ' gate has not passed', gate + ' failed'}]
+                remaining = [r for r in remaining if r not in {gate + ' failed or unavailable', gate + ' gate has not passed', gate + ' failed', *({'the vision comparison with the anchor failed'} if gate == 'vision_reference' else set())}]
                 umbrella = {'anchor': 'start_image'}.get(rev['stage'], rev['stage'])
                 gates = item['evidence'].get('gates', {})
                 failed = {name for name, value in gates.items() if not (value is True or isinstance(value, dict) and value.get('passed') is True)}
@@ -296,17 +296,38 @@ def record_decision(project_root, character_folder, *, revision_id, decision, ac
         if not rev:
             raise ValueError('unknown revision')
         if decision == 'accepted_with_exception':
-            if gate not in {'loop_smoothness', 'symmetry', 'walk_mechanics', 'direction_set'} or operation != rev['operation']:
+            if gate not in {'loop_smoothness', 'symmetry', 'walk_mechanics', 'direction_set', 'vision_reference'} or operation != rev['operation']:
                 raise ValueError('exception requires scoped artistic gate and exact operation')
             verdicts = [f['evidence'].get('gates', {}).get(gate) for f in rev['files'].values() if f['evidence']]
             if (not any(isinstance(v, dict) and v.get('passed') is False for v in verdicts)
                     or any(isinstance(v, dict) and (v.get('status') in {'unavailable', 'error'} or v.get('metrics', {}).get('status') in {'unavailable', 'error'}) for v in verdicts)):
                 raise ValueError('exception requires actual failed evidence')
+            if gate == 'vision_reference':
+                from .gates.acceptance import validate, revision_context, validation_record
+                from .gates.records import load_record, review_problem
+                prior = [d for d in state['decisions'] if d['revision_id'] == revision_id]
+                if prior and prior[-1]['decision'] == 'rejected':
+                    raise ValueError('human rejection cannot be waived')
+                for item in rev['files'].values():
+                    path = _safe_file(root, item['path'])
+                    if load_record(path) != item['evidence']:
+                        raise ValueError('gate evidence changed; register a new revision')
+                    context = revision_context(path, item['evidence'])
+                    evidence = validation_record(item['evidence'], context)
+                    if 'vision_reference' not in evidence.get('gates', {}) and review_problem(path) is None:
+                        # The anchor view is explicitly exempt from comparison with itself.
+                        from .gates.records import dependency_problems
+                        if dependency_problems(evidence) or evidence.get('rejected'):
+                            raise ValueError('anchor evidence changed or rejected')
+                        continue
+                    validate(path, evidence, gate, allow_passed=True)
         if decision != 'rejected':
             for item in rev['files'].values():
                 if _hash(_safe_file(root, item['path'])) != item['sha256']:
                     raise ValueError('revision bytes changed')
+        from datetime import datetime, timezone
         entry = {'decision_id': uuid4().hex, 'revision_id': revision_id, 'decision': decision,
+                 'time': datetime.now(timezone.utc).isoformat(),
                  'actor': actor, 'reason': reason, 'gate': gate, 'operation': operation or rev['operation'],
                  'provider': rev['provider'], 'sha256': next(iter(rev['files'].values()))['sha256'],
                  'artifact_hashes': {k: v['sha256'] for k, v in rev['files'].items()}}

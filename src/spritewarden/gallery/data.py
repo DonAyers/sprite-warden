@@ -91,6 +91,37 @@ class GalleryData:
         self._registry_path = registry_path
         self._registry: dict[str, Any] | None = None
 
+    def repair_source(self, asset_id):
+        from PIL import Image
+        from ..repair import digest, MAX_PIXELS
+        asset = self.asset(asset_id)
+        if not asset or not asset.get('exists'):
+            raise ValueError('repair asset missing')
+        path = Path(asset['resolved_path']).resolve()
+        if not path.is_relative_to(self.project_root.resolve()):
+            raise ValueError('repair asset outside project')
+        with Image.open(path) as opened:
+            if opened.width * opened.height > MAX_PIXELS:
+                raise ValueError('image exceeds repair limit')
+            image = opened.convert('RGBA')
+        colors = sorted(set(image.getdata()))
+        return {'asset_id': asset_id, 'source_digest': digest(image), 'width': image.width, 'height': image.height,
+                'palette': ['#%02x%02x%02x' % c[:3] for c in colors if c[3]], 'gate': asset.get('gate'), 'path': str(path)}
+
+    def repair(self, payload):
+        from ..repair import save_candidate
+        source = self.repair_source(payload['asset_id'])
+        result = save_candidate(self.project_root, source['path'], payload['source_digest'], payload.get('mask', []),
+                                payload.get('mapping', {}), actor=payload.get('actor'), reason=payload.get('reason'), patch=payload.get('patch'))
+        original = self.asset(payload['asset_id'])
+        result['asset_id'] = 'repair-' + result['run_id']
+        self.catalog.register_asset(result['asset_id'], 'Repair of ' + original['name'], result['path'], category='repair',
+                                    game=original.get('game') or 'global', character_id=original.get('character_id'),
+                                    palette_id=original.get('palette_id'), provenance={'kind': 'repair', 'source_asset_id': payload['asset_id'],
+                                    'source_digest': result['source_digest'], 'run_id': result['run_id'], 'approval': 'pending',
+                                    'changed_pixels': result['changed_pixels'], 'validation': result['validation']})
+        return result
+
     @property
     def registry(self) -> dict[str, Any]:
         if self._registry is None:

@@ -67,7 +67,7 @@ def gates_from_scorecard(card: Any, umbrella: str | None = None) -> dict[str, di
             "score": round(float(g.score), 3),
             "summary": g.summary,
             "errors": list(g.errors)[:6],
-            "status": "unavailable" if getattr(g, "metrics", {}).get("status") in {"unavailable", "error"} else ("pass" if g.passed else "fail"),
+            "status": getattr(g, "metrics", {}).get("status") if getattr(g, "metrics", {}).get("status") in {"unavailable", "error"} else ("pass" if g.passed else "fail"),
             "metrics": dict(getattr(g, "metrics", {})),
         }
     if umbrella:
@@ -185,6 +185,16 @@ def write_record(
     if extra:
         record.update(extra)
     previous = load_record(image_path)
+    if persist and previous:
+        ignored = {'time', 'event_id', 'human_decision', 'rejected', 'decision', 'capture_status'}
+        prior = {k: v for k, v in previous.items() if k not in ignored}
+        current = {k: v for k, v in record.items() if k not in ignored}
+        if prior == current and not dependency_problems(previous):
+            from ..events import emit
+            from ..enforce.config import find_project_root
+            emit('judgment.reused', project_root=(params or {}).get('project_root') or find_project_root(image_path.resolve().parent),
+                 payload={'image': str(image_path.resolve()), 'sha256': record['sha256'], 'previous_event_id': previous.get('event_id')})
+            return record_path(image_path)
     if previous and previous.get("sha256") == record["sha256"]:
         for key in ("rejected", "human_decision", "decision"):
             if key in previous:
@@ -262,6 +272,8 @@ def passed_gates(image_path: str | Path) -> set[str]:
     if record.get("rejected"):
         return set()  # a person said no: no gate result outlives that
     gates = record.get("gates", {})
+    from .acceptance import active
+    acceptance = active(image_path, record)
     if isinstance(gates, list):
         return {str(g) for g in gates}
     out = set()
@@ -269,6 +281,12 @@ def passed_gates(image_path: str | Path) -> set[str]:
         ok = verdict if isinstance(verdict, bool) else (isinstance(verdict, dict) and bool(verdict.get("passed", False)))
         if ok:
             out.add(str(name))
+    if acceptance:
+        out.add('vision_reference')
+        if stage_readiness(image_path, record.get('stage', 'views'))['ready']:
+            out.update({'views', 'direction_set'} if record.get('stage') == 'views' else {record.get('stage')})
+    if 'direction_set' in out and stage_readiness(image_path, 'views')['ready']:
+        out.add('views')
     for stage, names in (("views", {"views", "direction_set"}), ("anim", {"anim"}),
                          ("start_image", {"start_image"}), ("still", {"still"})):
         if out & names and not stage_readiness(image_path, stage)["ready"]:
@@ -295,6 +313,13 @@ def stage_readiness(image_path: str | Path, stage: str, expected_dependencies=No
     except OSError:
         reasons.append("image unavailable")
     reasons.extend(dependency_problems(record, expected_dependencies))
+    from .acceptance import revision_context
+    try:
+        context = revision_context(image_path, record)
+        if context and not expected_dependencies:
+            reasons = [r for r in reasons if r != 'dependency pipeline changed or unavailable']
+    except (ValueError, OSError, KeyError) as exc:
+        reasons.append(str(exc))
     if record.get("rejected"):
         reasons.append("human rejected this revision")
     gates = record.get("gates", {})
@@ -321,11 +346,25 @@ def stage_readiness(image_path: str | Path, stage: str, expected_dependencies=No
             else:
                 failed.append(name)
                 reasons.append(f"{name} failed")
+    from .acceptance import active
+    acceptance = active(image_path, record)
+    if acceptance:
+        waived = {'vision_reference failed', 'the vision comparison with the anchor failed'}
+        if set(failed) <= {'vision_reference', stage, 'direction_set'} and not unavailable:
+            waived.update({stage + ' gate has not passed', stage + ' failed', 'direction_set failed'})
+        if acceptance.get('revision_id'):
+            waived.add('dependency pipeline changed or unavailable')
+        reasons = [r for r in reasons if r not in waived]
     problem = review_problem(image_path)
+    # judge_direction_set historically copied the SET-wide vision aggregate
+    # onto every view. A passing local comparison plus passing pixel set is
+    # sufficient for this view; other failed views still block the whole set.
+    if stage == 'views' and passed(gates.get('direction_set')) and problem is None and set(failed) <= {'views'} and not unavailable:
+        reasons = [r for r in reasons if r not in {'views gate has not passed', 'views failed'}]
     if problem:
         reasons.append(problem)
     return {"ready": not reasons, "stage": stage, "reasons": reasons, "record": record,
-            "failed_checks": failed, "unavailable_checks": unavailable}
+            "failed_checks": failed, "unavailable_checks": unavailable, "acceptance": acceptance}
 
 
 def is_gated(image_path: str | Path, gate_name: str) -> bool:
@@ -375,7 +414,9 @@ def review_problem(image_path: str | Path) -> str | None:
             if not is_anchor_view:
                 return "never compared with the anchor by vision (no vision_reference gate)"
         elif not (vision if isinstance(vision, bool) else bool((vision or {}).get("passed"))):
-            return "the vision comparison with the anchor failed"
+            from .acceptance import active
+            if not active(image_path, record):
+                return "the vision comparison with the anchor failed"
     elif stage == "anim":
         if not (params.get("source") or params.get("source_path")):
             return "judged without --source (frames never compared with the still they came from)"
@@ -396,6 +437,7 @@ def require_passed(paths: Iterable[str | Path], gates: Iterable[str], *, strict:
     any of them) AND, with ``strict`` (the default), ``review_problem`` finds it
     fit to be shown.
     """
+    from .acceptance import active
     required = [g for g in gates if g]
     files = _expand(paths)
     missing: list[dict[str, Any]] = []
@@ -434,4 +476,6 @@ def require_passed(paths: Iterable[str | Path], gates: Iterable[str], *, strict:
         "checked": len(files),
         "missing": missing,
         "passed": ok_files,
+        "accepted": [{"path": f, **entry} for f in ok_files
+                     if (entry := active(f, load_record(f)))],
     }

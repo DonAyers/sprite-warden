@@ -482,6 +482,7 @@ async function openAsset(id, fromSequence = false) {
   $("#modal-content").innerHTML = `
     <h2>${esc(a.name)}</h2>
     <p class="muted">${esc(a.relative_path)}</p>
+    <a class="btn" href="/repair?asset_id=${encodeURIComponent(a.id)}">Repair pixels locally</a>
     ${sequenceControls}
     <div class="detail-grid">
       <div>
