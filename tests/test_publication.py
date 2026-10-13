@@ -18,6 +18,116 @@ def setup_project(root):
     return source,cid
 
 
+def test_prepare_without_upload_readback_records_gap_and_still_requires_confirm(tmp_path):
+    from spritewarden.publication import prepare,confirm,character_sync_reasons
+    source,cid=setup_project(tmp_path)
+    args={'image':'upload:22222222-2222-4222-8222-222222222222','target':f'character:{cid}:east'}
+    receipt=prepare(tmp_path,source,args['image'],args['target'],provider_gap='pixellab: no upload download',actor='TEST',reason='Publish')
+    assert receipt['uploaded_readback']=='unavailable'
+    assert receipt['provider_gap']=='pixellab: no upload download'
+    assert receipt['status']=='authorized'
+    assert check_call('mcp__pixellab__save_to_asset',args,tmp_path).decision=='allow'
+    assert character_sync_reasons(tmp_path,cid)
+    animation={'character_id':cid,'mode':'pixminimax','frame_count':16,'directions':['east'],'action_description':'fires laser'}
+    assert check_call('mcp__pixellab__animate_character',animation,tmp_path).decision=='deny'
+    downloads=tmp_path/'downloads';downloads.mkdir()
+    wrong=downloads/'wrong.png';Image.new('RGBA',(8,8),'blue').save(wrong)
+    with pytest.raises(ValueError,match='readback'):
+        confirm(tmp_path,receipt['id'],wrong)
+    stored=tmp_path/'.spritewarden/publications'/(receipt['id']+'.json')
+    assert json.loads(stored.read_text())['status']=='authorized'
+    readback=downloads/'remote-readback.png';Image.new('RGBA',(8,8),'red').save(readback)
+    assert confirm(tmp_path,receipt['id'],readback)['status']=='verified'
+    assert check_call('mcp__pixellab__save_to_asset',args,tmp_path).decision=='deny'
+    assert character_sync_reasons(tmp_path,cid)
+    assert check_call('mcp__pixellab__animate_character',animation,tmp_path).decision=='deny'
+
+
+def test_prepare_requires_exactly_one_readback_mode(tmp_path):
+    from spritewarden.publication import prepare
+    source,cid=setup_project(tmp_path)
+    args=(tmp_path,source,'upload:22222222-2222-4222-8222-222222222222',f'character:{cid}:east')
+    with pytest.raises(ValueError,match='exactly one'):
+        prepare(*args,actor='TEST',reason='x')
+    with pytest.raises(ValueError,match='exactly one'):
+        prepare(*args,uploaded_file=source,provider_gap='pixellab: no download',actor='TEST',reason='x')
+    assert not (tmp_path/'.spritewarden/publications').exists()
+
+
+def test_prepare_cli_without_upload_readback(tmp_path,capsys):
+    from spritewarden.publication_cli import main
+    source,cid=setup_project(tmp_path)
+    assert main(['--project',str(tmp_path),'prepare','--source',str(source),
+        '--image','upload:22222222-2222-4222-8222-222222222222','--target',f'character:{cid}:east',
+        '--no-upload-readback','pixellab: no upload download','--by','TEST','--reason','x'])==0
+    result=json.loads(capsys.readouterr().out)
+    assert result['uploaded_readback']=='unavailable' and result['status']=='authorized'
+
+
+@pytest.mark.parametrize('gap',['','   ','x'*501,False,17,{}])
+def test_prepare_rejects_invalid_provider_gap(tmp_path,gap):
+    from spritewarden.publication import prepare
+    source,cid=setup_project(tmp_path)
+    with pytest.raises(ValueError,match='provider_gap'):
+        prepare(tmp_path,source,'upload:22222222-2222-4222-8222-222222222222',f'character:{cid}:east',
+                provider_gap=gap,actor='TEST',reason='x')
+    assert not (tmp_path/'.spritewarden/publications').exists()
+
+
+def test_prepare_upload_readback_mode_is_verified_but_not_publication_confirmed(tmp_path):
+    from spritewarden.publication import prepare,character_sync_reasons
+    source,cid=setup_project(tmp_path)
+    receipt=prepare(tmp_path,source,'upload:22222222-2222-4222-8222-222222222222',f'character:{cid}:east',
+                    uploaded_file=source,actor='TEST',reason='x')
+    assert receipt['uploaded_readback']=='verified' and receipt['status']=='authorized'
+    assert 'provider_gap' not in receipt
+    assert character_sync_reasons(tmp_path,cid)
+
+
+def test_gap_mode_keeps_complete_character_verification_mandatory(tmp_path):
+    import shutil
+    from spritewarden.publication import prepare,confirm,verify_character,character_sync_reasons
+    source,cid=setup_project(tmp_path)
+    for facing in ('north','west'):Image.new('RGBA',(8,8),'red').save(tmp_path/'views'/(facing+'.png'))
+    for facing in ('north','east','south','west'):
+        write_record(tmp_path/'views'/(facing+'.png'),{'direction_set':True,'views':True,
+            'vision_reference':{'passed':True,'metrics':{'status':'match'}}},params={'command':'judge-views','facing':facing})
+    write_record(source,{'direction_set':True,'views':True,'vision_reference':{'passed':True,'metrics':{'status':'match'}}},params={'command':'judge-views','facing':'east'})
+    args={'image':'upload:22222222-2222-4222-8222-222222222222','target':f'character:{cid}:east'}
+    receipt=prepare(tmp_path,source,args['image'],args['target'],provider_gap='pixellab: no upload download',actor='TEST',reason='x')
+    downloaded=tmp_path/'downloaded';shutil.copytree(tmp_path/'views',downloaded)
+    with pytest.raises(ValueError,match='pending'):
+        verify_character(tmp_path,cid,downloaded)
+    confirm(tmp_path,receipt['id'],downloaded/'east.png')
+    assert character_sync_reasons(tmp_path,cid)
+    assert verify_character(tmp_path,cid,downloaded)['status']=='verified'
+    assert not character_sync_reasons(tmp_path,cid)
+    animation={'character_id':cid,'mode':'pixminimax','frame_count':16,'directions':['east'],'action_description':'fires laser'}
+    assert check_call('mcp__pixellab__animate_character',animation,tmp_path).decision=='allow'
+
+
+@pytest.mark.parametrize('mode_args',[[],['--uploaded-file','fixed.png','--no-upload-readback','pixellab: no download']])
+def test_prepare_cli_requires_exactly_one_readback_mode(tmp_path,mode_args):
+    from spritewarden.publication_cli import main
+    source,cid=setup_project(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        main(['--project',str(tmp_path),'prepare','--source',str(source),'--image','upload:22222222-2222-4222-8222-222222222222',
+              '--target',f'character:{cid}:east','--by','TEST','--reason','x',*mode_args])
+    assert error.value.code==2
+    assert not (tmp_path/'.spritewarden/publications').exists()
+
+
+def test_gap_mode_does_not_bypass_source_facing_or_readiness(tmp_path):
+    from spritewarden.publication import prepare
+    source,cid=setup_project(tmp_path)
+    image='upload:22222222-2222-4222-8222-222222222222'
+    with pytest.raises(ValueError,match='facing'):
+        prepare(tmp_path,source,image,f'character:{cid}:south',provider_gap='pixellab: no upload download',actor='TEST',reason='x')
+    write_record(source,{'direction_set':True,'views':False,'vision_reference':{'passed':False,'status':'fail','metrics':{'status':'mismatch'}}},params={'command':'judge-views','facing':'east'})
+    with pytest.raises(ValueError,match='ready'):
+        prepare(tmp_path,source,image,f'character:{cid}:east',provider_gap='pixellab: no upload download',actor='TEST',reason='x')
+
+
 def test_character_readback_must_match_all_registered_views(tmp_path):
     import shutil
     from spritewarden.publication import prepare,confirm,verify_character,character_sync_reasons

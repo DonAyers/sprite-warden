@@ -59,18 +59,24 @@ def source_snapshot(root, source):
     return {'source':str(source),'sha256':sha256_of(source),'evidence_hash':fingerprint(load_record(source))}
 
 
-def prepare(root,source,image,target,*,uploaded_file,actor,reason):
+def prepare(root,source,image,target,*,uploaded_file=None,provider_gap=None,actor,reason):
     from PIL import Image
     from .repair import digest
     from . import events
     root=Path(root).resolve();validate_image_reference(image)
+    if (uploaded_file is None)==(provider_gap is None):
+        raise ValueError('exactly one of uploaded_file or provider_gap is required')
+    if provider_gap is not None and (not isinstance(provider_gap,str) or not provider_gap.strip() or len(provider_gap)>500):
+        raise ValueError('provider_gap must be a non-empty provider/readback explanation of at most 500 characters')
     if not isinstance(actor,str) or not actor.strip() or not isinstance(reason,str) or not reason.strip():raise ValueError('reviewer and reason required')
     if len(actor)>200 or len(reason)>2000:raise ValueError('reviewer or reason too long')
     folder=within(root,root/'.spritewarden/publications')
-    source=within(root,source);uploaded_file=within(root,uploaded_file)
+    source=within(root,source)
     target_path,direction=target_file(root,target)
-    with Image.open(source) as a,Image.open(uploaded_file) as uploaded,Image.open(target_path) as old:
-        if digest(a)!=digest(uploaded):raise ValueError('uploaded readback does not match the local source pixels')
+    with Image.open(source) as a,Image.open(target_path) as old:
+        if uploaded_file is not None:
+            with Image.open(within(root,uploaded_file)) as uploaded:
+                if digest(a)!=digest(uploaded):raise ValueError('uploaded readback does not match the local source pixels')
         if a.size!=old.size:raise ValueError('replacement canvas differs from registered target')
         pixels=digest(a);size=list(a.size)
     snapshot=source_snapshot(root,source)
@@ -82,6 +88,8 @@ def prepare(root,source,image,target,*,uploaded_file,actor,reason):
     record=events.sanitize({**snapshot,'root':str(root),'id':str(uuid4()),'operation':'save_to_asset','provider':'pixellab','image':image,'target':target,
             'target_path':str(target_path),'target_sha256':hashlib.sha256(target_path.read_bytes()).hexdigest(),
             'pixel_digest':pixels,'size':size,'actor':actor,'reason':reason,'status':'authorized',
+            'uploaded_readback':'verified' if uploaded_file is not None else 'unavailable',
+            **({'provider_gap':provider_gap} if provider_gap is not None else {}),
             'expires':(datetime.now(timezone.utc)+timedelta(hours=24)).isoformat()})
     if not isinstance(record,dict):raise RuntimeError('publication authorization metadata could not be sanitized')
     record['fingerprint']=fingerprint(record)

@@ -9,8 +9,11 @@ def main(argv=None):
     p.add_argument('--project',default='.')
     sub=p.add_subparsers(dest='command',required=True)
     prepare=sub.add_parser('prepare',help='Authorize an exact native MCP rotation replacement; does not execute it')
-    for name in ('source','image','target','uploaded-file','by','reason'):
+    for name in ('source','image','target','by','reason'):
         prepare.add_argument('--'+name,required=True)
+    upload=prepare.add_mutually_exclusive_group(required=True)
+    upload.add_argument('--uploaded-file',help='Provider-downloaded upload PNG matching the local source')
+    upload.add_argument('--no-upload-readback',metavar='REASON',help='Provider and reason upload download is unavailable; post-save confirmation remains mandatory')
     confirm=sub.add_parser('confirm',help='Verify operator-downloaded remote readback after native save')
     confirm.add_argument('receipt_id');confirm.add_argument('--readback',required=True)
     review=sub.add_parser('review',help='Create a neutral-background contact sheet and full findings JSON, no model calls')
@@ -32,7 +35,8 @@ def main(argv=None):
             with report_path.open('x',encoding='utf-8') as stream:json.dump(report,stream,indent=2)
             result={'board':str(output),'report':str(report_path),'views':len(report),'model_calls':0}
         elif args.command=='prepare':
-            result=publication.prepare(args.project,args.source,args.image,args.target,uploaded_file=args.uploaded_file,actor=args.by,reason=args.reason)
+            result=publication.prepare(args.project,args.source,args.image,args.target,uploaded_file=args.uploaded_file,
+                                       provider_gap=args.no_upload_readback,actor=args.by,reason=args.reason)
         elif args.command=='verify-character':
             result=publication.verify_character(args.project,args.character_id,args.download_dir)
         elif args.command=='cancel':
