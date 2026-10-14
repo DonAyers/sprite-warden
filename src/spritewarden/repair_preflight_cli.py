@@ -10,13 +10,20 @@ from .repair_preflight import inspect_plan
 def render_report(result):
     def esc(value):return html.escape(str(value))
     figures=[]
-    for kind,label in [('source','Original'),('candidate','Candidate')]:
-        if not result.get(kind):continue
+    images=[(result['source'],'Original',result['metrics']['source_sha256'])]
+    if result.get('candidate'):images.append((result['candidate'],'Candidate',result['metrics']['candidate_sha256']))
+    if result.get('donor'):
+        d=result['donor'];images.append((d['image'],f"Donor — {d['facing']} — {d['usage']}",d['sha256']))
+    images.extend((r['image'],f"Reference — {r['facing']}",r['sha256']) for r in result.get('references',[]))
+    for image_path,label,expected_digest in images:
         import hashlib
-        raw=Path(result[kind]).read_bytes()
-        if hashlib.sha256(raw).hexdigest()!=result['metrics'][kind+'_sha256']:raise ValueError('image changed since preflight; rerun local inspection')
+        from io import BytesIO
+        from PIL import Image
+        raw=Path(image_path).read_bytes()
+        if hashlib.sha256(raw).hexdigest()!=expected_digest:raise ValueError('image changed since preflight; rerun local inspection')
+        with Image.open(BytesIO(raw)) as image:width=image.width
         encoded=base64.b64encode(raw).decode('ascii')
-        figures.append(f'<figure><img alt="{label}" src="data:image/png;base64,{encoded}"><figcaption>{label}</figcaption></figure>')
+        figures.append(f'<figure><img alt="{esc(label)}" src="data:image/png;base64,{encoded}"><figcaption>{esc(label)}</figcaption><img class="actual" style="width:{width}px" alt="{esc(label)} at game scale" src="data:image/png;base64,{encoded}"><figcaption>Game scale</figcaption></figure>')
     blockers=''.join('<li>'+esc(item)+'</li>' for item in result['blockers']) or '<li>No deterministic blocker found. This is not artistic approval.</li>'
     options=''.join(f'<li><strong>{esc(action)}</strong>'+(' — '+esc(reason) if reason else ' — eligible proposal')+'</li>' for action,reason in list(result['excluded_actions'].items())+[(a,None) for a in result['eligible_actions']])
     metrics=esc(json.dumps(result['metrics'],indent=2))
@@ -30,7 +37,9 @@ h1{{font-size:22px;margin:0 0 8px}}h2{{font-size:16px;margin:18px 0 8px}}
 pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card,#222);padding:10px}}li{{margin-bottom:6px}}
 .note{{color:var(--muted-foreground,#aaa)}}
 </style><section><h1>Repair preflight</h1><span class="status">{esc(result['status'].upper())} · {esc(result['defect_kind'])}</span>
-<p>{esc(result['goal'])}</p><div class="images">{''.join(figures)}</div>
+<p><strong>Mechanical: {esc(result['mechanical_status'].upper())} · Pose: {esc(result['pose_review_status'].upper())}</strong></p>
+<p>{esc(result['next_step'])}</p><p>{esc(result['goal'])}</p><div class="images">{''.join(figures)}</div>
+<h2>Donor provenance</h2><pre>{esc(json.dumps(result.get('donor'),indent=2))}</pre>
 <h2>Plan checks</h2><ul>{blockers}</ul><h2>Strategies</h2><ul>{options}</ul>
 <h2>Jev recommendation</h2><p>{esc(result['decision'] or 'No model selection')} · {esc(result['decision_status'])} · model calls: {result['model_calls']}</p>
 <p>Generation spend cap: ${result['spend_cap_usd']:.2f}. Quotes: {esc(result['quoted_costs'])}</p>

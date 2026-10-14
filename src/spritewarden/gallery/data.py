@@ -112,14 +112,17 @@ class GalleryData:
         from ..repair import save_candidate
         source = self.repair_source(payload['asset_id'])
         result = save_candidate(self.project_root, source['path'], payload['source_digest'], payload.get('mask', []),
-                                payload.get('mapping', {}), actor=payload.get('actor'), reason=payload.get('reason'), patch=payload.get('patch'))
+                                payload.get('mapping', {}), actor=payload.get('actor'), reason=payload.get('reason'), patch=payload.get('patch'),
+                                repair_plan=payload.get('repair_plan'))
         original = self.asset(payload['asset_id'])
         result['asset_id'] = 'repair-' + result['run_id']
         self.catalog.register_asset(result['asset_id'], 'Repair of ' + original['name'], result['path'], category='repair',
                                     game=original.get('game') or 'global', character_id=original.get('character_id'),
                                     palette_id=original.get('palette_id'), provenance={'kind': 'repair', 'source_asset_id': payload['asset_id'],
                                     'source_digest': result['source_digest'], 'run_id': result['run_id'], 'approval': 'pending',
-                                    'changed_pixels': result['changed_pixels'], 'validation': result['validation']})
+                                    'changed_pixels': result['changed_pixels'], 'validation': result['validation'],
+                                    'preflight':result.get('preflight'), 'repair_plan':result.get('repair_plan'),
+                                    'pose_review_status':result.get('preflight',{}).get('pose_review_status','not_assessed')})
         return result
 
     @property

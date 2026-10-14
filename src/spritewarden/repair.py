@@ -5,7 +5,7 @@ from PIL import Image
 MAX_PIXELS = 1024 * 1024
 
 
-def save_candidate(root, source, expected_digest, mask, mapping, *, actor, reason, patch=None):
+def save_candidate(root, source, expected_digest, mask, mapping, *, actor, reason, patch=None, repair_plan=None):
     """Save a new, unapproved candidate with a reversible, source-bound patch."""
     import json
     from pathlib import Path
@@ -32,19 +32,48 @@ def save_candidate(root, source, expected_digest, mask, mapping, *, actor, reaso
     patch = make_patch(before, after)
     if not patch['changes']:
         raise ValueError('repair changes no pixels')
+    preflight=None
+    alpha_changed=before.getchannel('A').tobytes()!=after.getchannel('A').tobytes()
+    if alpha_changed and repair_plan is None:
+        raise ValueError('silhouette/alpha repair requires an explicit repair plan; pose is not inferred from pixels')
+    if repair_plan is not None:
+        from .repair_preflight import inspect_plan, RepairPlan, _within
+        plan=RepairPlan.model_validate(repair_plan)
+        if _within(root,plan.source)!=source:raise ValueError('repair plan source differs from actual source')
+        if alpha_changed and plan.defect_kind not in {'geometry','orientation'}:
+            raise ValueError('alpha repair requires geometry/orientation plan')
+        if plan.proposed_action not in {'color_patch','geometry_patch','donor_patch'}:
+            raise ValueError('local repair cannot claim a provider generation plan')
+        preflight=inspect_plan(root,plan.model_dump(),candidate_image=after)
+        if preflight['status']=='blocked':raise ValueError('repair plan blocked: '+'; '.join(preflight['blockers']))
+        repair_plan=plan.model_dump()
     run = str(uuid4())
     destination = source.parent / '.repairs' / run
     if not destination.resolve().is_relative_to(root):
         raise ValueError('repair destination outside project')
     payload = {'source': str(source), 'source_digest': expected_digest, 'actor': actor, 'reason': reason, 'changed_pixels': len(patch['changes'])}
+    if preflight:
+        payload.update({'repair_plan':repair_plan,'preflight':preflight})
+    else:
+        payload.update({'preflight_status':'not_supplied','pose_review_status':'not_assessed'})
     if not events.emit('repair.started', project_root=root, run_id=run, payload=payload):
         raise RuntimeError('repair intent capture failed')
     with Image.open(source) as opened:
         if digest(opened) != expected_digest:
             raise ValueError('source changed during repair capture')
+    if preflight:
+        dependencies=[{'image':str(source),'sha256':preflight['metrics']['source_sha256']},*preflight['references']]
+        if preflight.get('donor'):dependencies.append(preflight['donor'])
+        if plan.mask:dependencies.append({'image':str(_within(root,plan.mask)),'sha256':preflight['metrics']['mask_sha256']})
+        for dependency in dependencies:
+            checked=Path(dependency['image']).resolve()
+            if not checked.is_relative_to(root) or hashlib.sha256(checked.read_bytes()).hexdigest()!=dependency['sha256']:
+                raise ValueError('repair dependency changed during intent capture; inspect current inputs')
     destination.mkdir(parents=True, exist_ok=False)
     target = destination / source.name
     after.save(target, 'PNG')
+    if preflight:
+        preflight['candidate']=str(target)
     (destination / 'patch.json').write_text(json.dumps(patch, indent=2), encoding='utf-8')
     from .judge.pixel import check_pixel_grid
     grid, _ = check_pixel_grid(after)

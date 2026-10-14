@@ -489,7 +489,10 @@ def preflight_repair(project_root: str, plan: dict, ask_jev: bool = False,
     for ONE decision query only; it never authorizes generation, acceptance or publication.
     Plan schema: source, goal, defect_kind, proposed_action; optional candidate, mask,
     required_regions {name:[x,y,width,height]}, preserved_regions, available_actions,
+    target_facing, donor {image,facing,region,usage,transforms}, references [{image,facing}],
     spend_cap_usd, quoted_costs, request_fingerprint, attempts and max_paid_attempts.
+    Direct geometry/orientation donor copies require matching declared facings; a
+    flipped front donor is not a rear reconstruction. Mechanical clearance leaves pose unverified.
     Do not treat a missing model decision or an assessment dispute as approval.
     """
     from ..repair_preflight import inspect_plan

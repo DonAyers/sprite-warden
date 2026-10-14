@@ -68,6 +68,38 @@ The existing OpenRouter Decisions API client asks Choice over only the remaining
 
 A durable `repair.decision_started` event is required before the query; completion records the typed outcome and reported cost. If intent cannot commit, no query is submitted. A lost completion receipt must not cause a paid retry; consult the durable intent/receipts. Offline inspection does not create these events.
 
+## Donor orientation and pose review
+
+For geometry/orientation plans, a `donor_patch` now requires `target_facing` and an actual `donor` object:
+
+```json
+{
+  "target_facing": "north",
+  "donor": {
+    "image": "art_source/character/south.png",
+    "facing": "south",
+    "region": [67, 44, 11, 21],
+    "usage": "direct_copy",
+    "transforms": ["flip_horizontal", "translate"]
+  },
+  "references": [{"image": "art_source/character/east.png", "facing": "east"}]
+}
+```
+
+This is an **illustrative blocked operation**, not a recommended repair or a complete plan. The region is an example and must fit the actual donor canvas. Canonical facings use hyphens: `north-east`, `south-east`, `south-west`, `north-west` (plus cardinal names). No alias normalization or facing inference from filenames occurs.
+
+A direct geometry/orientation copy across different declared facings is excluded: reflection/translation is not a reconstruction of visible surfaces and depth. Relabeling such a copy `geometry_patch` does not clear its blocker. `redraw` is not a direct-copy transformation. To use a front view as a design reference, set `usage: reference`, `transforms: [redraw]`, choose `geometry_patch`, and actually reconstruct the pose against the target view. Missing donor details exclude that strategy before optional Jev ranking even when another action was proposed.
+
+These are conservative checks on **declared provenance**, not a visual proof or authentication of labels or claimed operations. Misdeclared/omitted donor use and external scripts remain outside this guarantee. Color-only donor work does not imply pose correction. Valid same-facing copies are still pose-unverified.
+
+`mechanical_status` and `pose_review_status` are separate. Geometry/orientation reports always show **Pose: UNVERIFIED**, even with clear mechanical checks. The report shows whole original/candidate, donor and optional direction references at game scale and zoom; image bytes must match the measured SHA-256 snapshots. Show the rough pose to the owner before polishing or paid validation. No new model or automatic pose-approval gate is introduced.
+
+## Saved repair binding
+
+`repair.save_candidate(..., repair_plan=plan)` and gallery `/api/repair` payload field `repair_plan` attach the canonical plan to a new candidate. Plans must resolve to the actual source, use a local patch strategy, and must not name a separate `candidate`: the save path checks the actual computed candidate pixels in memory. Blocked plans never save. Donor/reference/source hashes are rechecked after durable intent, before writing. `repair.json` and catalog provenance retain plan, donor/reference identities, mechanical findings, candidate hash and unverified pose state.
+
+Alpha/silhouette changes require an explicit geometry/orientation plan. Legacy RGB-only work without a plan remains supported but is marked **preflight not supplied / pose not assessed**; its semantic intent cannot be inferred from pixel changes. Attach a plan for all pose repairs, including RGB-only internal-geometry edits. The gallery provides a plan JSON editor and displays the separate mechanical/pose statuses after saving. Existing source-bound gate/owner acceptance rules still apply; saving does not confer pose approval or inherit an older candidate's approval. This integration does not intercept external provider requests or arbitrary file writes.
+
 ## Human boundary
 
 Show the original, candidate, measurements, blockers, strategy options and any Jev recommendation. Have the owner inspect the actual pose at game scale and zoom. Changing pixels in an elbow region does **not** establish that the elbow looks correct. Filename `north` and preserved alpha are not visual evidence of away-facing orientation.
